@@ -292,6 +292,18 @@ event    (id INTEGER PK AUTOINCREMENT, issue_id, run_id?, actor_id, type,
     </tbody>
   </table>
   <p><strong>event 承载一切事实，artifact 承载一切产物。</strong>event 里出现大段正文就是设计错误。</p>
+  <p><code>event.type</code> 表上不设 <code>CHECK</code> —— 事实流加枚举约束，等于「记一条新事实」要改表结构。取值以这张表为全集，新增先改文档：</p>
+  <table>
+    <thead><tr><th style="width:18%">类别</th><th style="width:56%">type</th><th>谁写</th></tr></thead>
+    <tbody>
+      <tr><td>生命周期</td><td><code>issue_created</code> / <code>gate_opened</code> / <code>gate_approved</code> / <code>gate_rejected</code></td><td><code>stage_driver</code></td></tr>
+      <tr><td>run</td><td><code>run_queued</code> / <code>run_succeeded</code> / <code>run_failed</code></td><td><code>stage_driver</code></td></tr>
+      <tr><td>路由</td><td><code>route_pending</code></td><td>派发时无候选</td></tr>
+      <tr><td>阻塞</td><td><code>blocked</code></td><td><code>stage_driver</code></td></tr>
+      <tr><td>agent 上报</td><td><code>progress</code> / <code>note</code> / <code>artifact</code></td><td>daemon 转发 agent 声明</td></tr>
+      <tr><td>人</td><td><code>comment</code></td><td>人</td></tr>
+    </tbody>
+  </table>
 
   <h3>4.2 没有 comments 表</h3>
   <p>评论就是 <code>event(type='comment')</code>。评论、状态变更、阻塞报告、run 结果都在事件流里，审计与实时推送共用一条数据流。</p>
@@ -301,6 +313,7 @@ event    (id INTEGER PK AUTOINCREMENT, issue_id, run_id?, actor_id, type,
 
   <h3>4.4 UNIQUE 约束</h3>
   <p>必须是 <code>UNIQUE(issue_id, stage, attempt)</code>。用 <code>(issue_id, attempt)</code> 会让 <code>gen_script</code> 的第 1 次和 <code>gen_case</code> 的第 1 次撞车，插入直接失败。</p>
+  <p><code>artifact.version</code> 同理要定死：<code>MAX(version)+1</code>，而且<strong>与插入在同一个 <code>BEGIN IMMEDIATE</code> 里算</strong>。用 <code>COUNT(*)+1</code> 一旦删过行就会撞唯一键；两个 daemon 同时交付同一个 stage 时各自读到同一个 MAX，后一条插入直接 500。</p>
 
   <h3>4.5 为什么只有 event 用 AUTOINCREMENT</h3>
   <p><code>event.id</code> 是 SSE 的游标。客户端断线重连带 <code>Last-Event-ID: 1042</code>，服务端补 <code>id &gt; 1042</code>。</p>
@@ -352,7 +365,7 @@ event    (id INTEGER PK AUTOINCREMENT, issue_id, run_id?, actor_id, type,
 <pre><code>有编排：run 成功 → 推进到 next；run 失败 → 按 on_failure 路由回退
 无编排：run 成功 → status = done；run 失败 → 原地重试，超限则 blocked（没有回退边）</code></pre>
   <p>共用的部分一点没变：run 生命周期、CAS 认领、心跳回收、预算闸门、事件流。</p>
-  <p><code>run.stage</code> 是 <code>NOT NULL</code>，无编排 issue 的 run 统一填保留名 <code>'__single__'</code>（定义成一个常量，全局只有这一处魔术字符串）。<code>UNIQUE(issue_id, stage, attempt)</code> 依然工作，所以无编排 issue 的重试计数照常。</p>
+  <p><code>run.stage</code> 是 <code>NOT NULL</code>，无编排 issue 的 run 统一填保留名 <code>'__single__'</code>（定义成一个常量，全局只有这一处魔术字符串）。<code>UNIQUE(issue_id, stage, attempt)</code> 依然工作，所以无编排 issue 的重试计数照常。启动期校验 workflow 里没有同名 stage，撞上就拒绝启动 —— 否则一条真实 stage 的 run 会被当成无编排的。</p>
   <p>无编排的 run <strong>恒为 <code>kind='agent'</code></strong>。<code>job</code> 必须有 <code>command</code>，而 command 只能来自 workflow 定义 —— 想跑一条命令，就写一份只含单个 job 阶段的 workflow，而不是把无编排撑成两种形态。</p>
   <div class="lead">
     <p><strong>看板上不混排。</strong>列由 workflow 的 stage 生成，无编排的 issue 不属于任何一列，它们进独立的「直接任务」列表视图。不要为了塞进看板造一个虚拟列 —— 一个只有一列的看板不是看板。</p>
@@ -533,7 +546,8 @@ max_stage_attempts: 3</code></pre>
   <h4>三、无候选时不建 run</h4>
   <p>这是本节最重要的一条：<strong>路由失败不能落成 run 失败。</strong></p>
   <p>issue 停在 <code>active</code>，<code>current_stage</code> 指向那个 stage，但没有活跃 run，写一条 <code>event(type='route_pending')</code>。看板上这张卡显示「等待 agent」，不是「失败」。daemon 上线后补派。</p>
-  <p>「待派发」不需要新字段，它是派生的：<code>status='active'</code> + <code>current_stage</code> 非空 + 无活跃 run + <code>stage.kind != 'gate'</code>。</p>
+  <p>「待派发」不需要新字段，它是派生的：<code>status='active'</code> + <code>current_stage</code> 非空 + <code>awaiting_gate</code> 为空 + 无活跃 run。</p>
+  <p>gate 阶段同样没有 run，不排除它，一张正在等人审的单子就会被当成待派发 —— daemon 每次重连都补派一遍，而那里根本没有要派的活。</p>
 <pre><code>def on_runtime_online(runtime_id):
     for issue in pending_dispatch():        # 走 idx_issue_board
         dispatch(issue, issue.current_stage)</code></pre>
@@ -587,11 +601,13 @@ on_failure:
   <p>只把 <code>current_stage</code> 改回去重跑，agent 看到的输入和上次一样，会生成几乎一样的脚本。三轮之后 token 烧完，结论是「搞不定」。</p>
 <pre><code>{
   "base": { "artifact_id": 412, "hash": "sha256:9f3a..." },
+  "replaces": { "artifact_id": 418, "hash": "sha256:7c10..." },
   "feedback": {
     "from_run": 887,
     "error_class": "script_bug",
     "signal": "AssertionError: LBA 0x1a2f expect 0x00 got 0x47",
-    "log_artifact": 915
+    "log_artifact": 915,
+    "note": "断言写死了物理偏移 0x1a2f，FTL 重映射后必然失败"
   },
   "constraints": [
     "只改断言与重试逻辑",
@@ -599,6 +615,8 @@ on_failure:
     "不得修改验收标准"
   ]
 }</code></pre>
+  <p><code>base</code> 与 <code>replaces</code> 是两个位置，不能合成一个：<code>base</code> 是本 stage 的上游输入（用例），<code>replaces</code> 是本 stage 自己的上一版（要被换掉的脚本）。回退时两者都要指 —— 只给 <code>base</code>，agent 要么整篇重写（上一轮 review 结论作废），要么自己扫 <code>artifact</code> 表找「本 stage 最新一条」。</p>
+  <p><code>feedback</code> 里 <code>note</code> 与 <code>signal</code> 分开：<code>signal</code> 是日志给的定位，<code>note</code> 是人打回时写的方向。两者可能只有其一 —— 环境失败没有 note，人打回没有 signal。</p>
   <p><code>constraints</code> 比 feedback 更重要。没有它，agent 回退时会顺手改用例，问题从「脚本错了」变成「用例被悄悄改了」，上一轮 review 结论直接作废。</p>
   <p><code>feedback</code> 里<strong>没有「可能的原因」这一项</strong>。要写它就得懂日志，而产出失败的那个 <code>job</code> run 根本不调模型；让 agent 自己从 <code>signal</code> + <code>log_artifact</code> 里读，比让上一个进程塞一句猜测更准。</p>
   <p><code>error_class</code> 同理，由 daemon 用<strong>退出码 + 日志正则</strong>判定；判不出就报 <code>unknown</code>，按路由转 <code>blocked</code> 交给人。不允许「猜一个最像的」—— 猜错会把回退引到错误的阶段，而且要绕三轮才发现。</p>
@@ -610,6 +628,8 @@ on_failure:
    AND stage IN (?, ?, ?);   -- 回退目标（含）之后的全部阶段，由 workflow 静态算出</code></pre>
   <p>SQLite 没有 <code>= ANY(array)</code>，下游阶段列表在应用层拼成 <code>IN (?, ?, ...)</code> 占位符。阶段数量来自 workflow 定义、完全固定，既不存在注入风险，也不存在拼接长度问题。</p>
   <p>正向推进遇到 <code>stale=true</code> 的产物，<strong>必须重走该阶段，不能跳</strong>。这是「重入式工作流」：回退只重跑受影响的下游。</p>
+  <p>只标<strong>已存在</strong>的行。回退发生在新版本产出之前，v3 那时还不存在；若实现成「推进时按阶段标 stale」，刚产出的新产物会被自己标掉，此后每次推进都判 stale，直接死循环。</p>
+  <p>gate 不在这个范围内：它不产 artifact，而回退之后再推进到它时会重新开闸 ——「这个门通过没有」不需要持久化，<code>event(type='gate_approved')</code> 里查得到。</p>
 </section>
 
 <section>
@@ -766,14 +786,15 @@ def on_issue_created(issue):
     <thead><tr><th style="width:66px">方法</th><th style="width:38%">路径</th><th>说明</th></tr></thead>
     <tbody>
       <tr><td><code>GET</code></td><td><code>/api/runtime/stream?runtime_id=</code></td><td>SSE，推送本 runtime 的 job</td></tr>
-      <tr><td><code>POST</code></td><td><code>/api/runs/:id/claim</code></td><td>CAS 认领，返回 <code>claim_token</code> + <code>inputs</code></td></tr>
+      <tr><td><code>POST</code></td><td><code>/api/runs/:id/claim</code></td><td>CAS 认领，返回 <code>claim_token</code> + <code>inputs</code> + <code>budget</code>（本单剩余额度）</td></tr>
       <tr><td><code>POST</code></td><td><code>/api/runs/:id/heartbeat</code></td><td>心跳</td></tr>
       <tr><td><code>POST</code></td><td><code>/api/runs/:id/events</code></td><td>批量上报（≤200 条/次）</td></tr>
       <tr><td><code>POST</code></td><td><code>/api/runs/:id/complete</code></td><td><code>{status, error_class?, artifacts?, usage}</code></td></tr>
-      <tr><td><code>POST</code></td><td><code>/api/issues/:id/block</code></td><td>声明阻塞，由后端转 blocked</td></tr>
+      <tr><td><code>POST</code></td><td><code>/api/runs/:id/block</code></td><td>声明阻塞，由后端转 blocked</td></tr>
     </tbody>
   </table>
   <p><strong>注意</strong>：<code>complete</code> 提交的是 <code>error_class</code> 枚举，不是「回退到哪个阶段」。路由由后端按 workflow 定义决定。</p>
+  <p><code>artifacts</code> 里给的是 workspace 相对路径（<code>out/case_10.py</code>）或外部 URL（PR），<strong>不是</strong>最终的 <code>content_ref</code>：后端把它搬进 <code>artifacts/{issue}/{stage}/v{n}/</code>、算 hash、分配版本号，再落库。让 agent 拼版本目录或算 hash，一定会和 daemon 撞车。</p>
 
   <h3>7.3 两个 SSE 端点，同一套机制</h3>
   <p>同一个 handler、同一套重连与游标逻辑，暴露两个入口 —— 浏览器订阅 issue 流，daemon 订阅 runtime 流。</p>
@@ -891,7 +912,8 @@ def on_issue_created(issue):
       <tr><td>run failed</td><td><code>counts=true</code>，已超限</td><td><code>status = blocked</code></td></tr>
       <tr><td>run failed</td><td><code>counts=false</code>（env）</td><td><code>current_stage</code> 不变，新建同 stage 的 run（attempt+1）</td></tr>
       <tr><td>gate approved</td><td>非末阶段</td><td><code>current_stage = next</code>，清 <code>awaiting_gate</code></td></tr>
-      <tr><td>gate rejected</td><td>带 <code>back_to</code></td><td><code>current_stage = back_to</code>，标下游 stale，清 <code>awaiting_gate</code></td></tr>
+      <tr><td>gate approved</td><td>末阶段</td><td><code>status = done</code>，<code>current_stage</code> 保持末阶段</td></tr>
+      <tr><td>gate rejected</td><td>带 <code>back_to</code></td><td><code>current_stage = back_to</code>，标下游 stale，清 <code>awaiting_gate</code>，不计 <code>stage_attempts</code></td></tr>
       <tr><td>gate rejected</td><td>未带 <code>back_to</code></td><td>拒绝请求，400</td></tr>
       <tr><td>任意推进</td><td>存在活跃 run</td><td>拒绝派发，等待现有 run 结束</td></tr>
       <tr><td>任意派发</td><td>路由有候选</td><td>按排序选一个，trace 存进 <code>run.route</code>，建 run</td></tr>

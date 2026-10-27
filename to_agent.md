@@ -49,11 +49,17 @@
       "hash": "sha256:9f3a…",
       "ref": "artifacts/10/gen_case/v1/testcase.md"
     },
+    "replaces": {
+      "artifact_id": 418,
+      "hash": "sha256:7c10…",
+      "ref": "artifacts/10/gen_script/v1/case_10.py"
+    },
     "feedback": {
       "from_run": 880,
       "error_class": "script_bug",
       "signal": "AssertionError: LBA 0x1a2f expect 0x00 got 0x47",
-      "log_artifact": 915
+      "log_artifact": 915,
+      "note": "断言写死了物理偏移 0x1a2f，FTL 重映射后必然失败"
     },
     "constraints": [
       "只改断言与重试逻辑",
@@ -69,7 +75,8 @@
 |---|---|---|
 | `stage.artifacts` | 总是 | 全部产出，少一项不能报 `succeeded` |
 | `inputs.base` | 首次为空 | 空 = 从零做；非空 = 在它之上改，不是重写 |
-| `inputs.feedback` | 回退重做时 | 先读它再动手，见第六节 |
+| `inputs.replaces` | 本 stage 有上一版时（首次为空） | 你要替换的那份产物。新版从它改出来，不要另起一份 |
+| `inputs.feedback` | 回退重做时 | `note` 是人给的方向，`signal` / `log_artifact` 是定位。先读它再动手，见第六节 |
 | `inputs.constraints` | 可能为空 | 硬边界，逐条遵守 |
 | `budget` | 总是 | 这张单子**剩余**的额度（不是本次 run 的配额）；见第七节 |
 | `workspace` | 总是 | 工作目录，仓库已 checkout 到本 issue 的分支 |
@@ -128,7 +135,7 @@
 {
   "status": "succeeded",
   "artifacts": [
-    { "kind": "script", "ref": "git:issue-10/gen_script@a1b2c3d:tests/case_10.py" }
+    { "kind": "script", "ref": "out/case_10.py" }
   ],
   "usage": { "tokens_in": 48210, "tokens_out": 6310 }
 }
@@ -142,7 +149,7 @@
   "error_class": "script_bug",
   "error": "pytest 收集失败：tests/case_10.py:41 IndentationError",
   "artifacts": [
-    { "kind": "script", "ref": "git:issue-10/gen_script@a1b2c3d:tests/case_10.py" }
+    { "kind": "script", "ref": "out/case_10.py" }
   ]
 }
 ```
@@ -150,8 +157,8 @@
 没有「部分成功」。产物不满足 `stage.artifacts` 全集就是 `failed`，
 说明完成到哪一步，由后端决定是回退还是转人。
 
-`artifacts` 里给 `ref`，**不要给 hash** —— hash 由 daemon 读文件后计算。
-两个地方各算一遍，一定会不一致。
+`artifacts` 里给 `ref`：workspace 相对路径（`out/case_10.py`），PR 给 URL。
+**不要给 hash、不要拼版本目录** —— 版本号与 hash 由 daemon 分配和计算，两处各算一遍一定会不一致。
 
 ---
 
@@ -184,12 +191,13 @@
 `inputs.feedback` 非空，说明上一次失败了。这时最容易犯的错是「整篇重写一版」：
 被 review 过的结论连同 diff 一起作废，人还得从头再看一遍。
 
-1. 先读 `feedback.signal` 与 `feedback.log_artifact`，**定位到具体位置再动手**。
-   不读日志就开始改，改的是你猜的那处。
+1. 先读 `feedback.note`（人给的方向）与 `feedback.signal` / `log_artifact`（定位），
+   **定位到具体位置再动手**。不读日志就开始改，改的是你猜的那处。
 2. `constraints` 优先于你的判断。即使你认为别处也该改，也不改 —— 那属于另一个 stage，
    越界修改会让问题从「脚本错了」变成「用例被悄悄改了」。
 3. 只改失败涉及的部分。改动范围超过一半时，停下想一遍：是不是 error_class 判错了。
-4. 新产物与 `base.hash` 完全相同时会被直接判失败（「上一轮反馈未被采纳」），连运行都不会进。
+4. `base.hash` 是上游的版本指纹。对不上说明上游在你开工后被换过 —— 按当前版本重做，
+   不要迁就你手上那份旧内容。
 5. **回退不重置预算。** 多试几次不会让额度变宽，反而更快撞上 `max_tokens_total`。
 
 ---
@@ -319,7 +327,7 @@ script_bug（错在你的产物）、case_bug（错在用例）、requirement（
 env（外部环境故障，可重跑）、budget（预算耗尽）、unknown（判不出）。
 判不出就报 unknown，不要猜 —— 猜错会把回退引到错的阶段。
 
-收到 inputs.feedback 说明是回退重做：先读 signal 和 log_artifact 定位到具体位置，
+收到 inputs.feedback 说明是回退重做：先读 note 和 signal 定位到具体位置，
 只改失败涉及的部分，不要整篇重写。inputs.constraints 是硬边界，即使你认为别处也该改也不改。
 
 不 push main，不覆盖历史产物，不在任何地方写凭证。

@@ -292,6 +292,18 @@ CREATE INDEX idx_event_run   ON event (run_id, id);
 
 **event 承载一切事实，artifact 承载一切产物。** event 里出现大段正文就是设计错误。
 
+`event.type` 表上不设 `CHECK` —— 事实流加上枚举约束，等于「记一条新事实」要改表结构。
+取值以这张表为全集，新增先改文档：
+
+| 类别 | type | 谁写 |
+|---|---|---|
+| 生命周期 | `issue_created` / `gate_opened` / `gate_approved` / `gate_rejected` | `stage_driver` |
+| run | `run_queued` / `run_succeeded` / `run_failed` | `stage_driver` |
+| 路由 | `route_pending` | 派发时无候选 |
+| 阻塞 | `blocked` | `stage_driver` |
+| agent 上报 | `progress` / `note` / `artifact` | daemon 转发 agent 声明 |
+| 人 | `comment` | 人 |
+
 ### 4.2 没有 comments 表
 
 评论就是 `event(type='comment')`。评论、状态变更、阻塞报告、run 结果都在事件流里，
@@ -308,6 +320,10 @@ CREATE INDEX idx_event_run   ON event (run_id, id);
 必须是 `UNIQUE(issue_id, stage, attempt)`。
 
 用 `(issue_id, attempt)` 会让 `gen_script` 的第 1 次和 `gen_case` 的第 1 次撞车，插入直接失败。
+
+`artifact.version` 同理要定死：`MAX(version)+1`，而且**与插入在同一个 `BEGIN IMMEDIATE` 里算**。
+用 `COUNT(*)+1` 一旦删过行就会撞唯一键；两个 daemon 同时交付同一个 stage 时各自读到同一个
+MAX，后一条插入直接 500 —— 这类冲突只在并发时出现，本地测不出来。
 
 ### 4.5 只有 event 表用 AUTOINCREMENT
 
@@ -398,7 +414,8 @@ INSERT INTO workflow (id, version, spec, spec_hash, created_at) VALUES (?, ?, ?,
 共用的部分一点没变：run 生命周期、CAS 认领、心跳回收、预算闸门、事件流。
 
 `run.stage` 是 `NOT NULL`，无编排 issue 的 run 统一填保留名 `'__single__'`
-（定义成一个常量，全局只有这一处魔术字符串）。`UNIQUE(issue_id, stage, attempt)`
+（定义成一个常量，全局只有这一处魔术字符串）。启动期校验 workflow 里没有同名 stage，
+撞上就拒绝启动 —— 否则一条真实 stage 的 run 会被当成无编排的。`UNIQUE(issue_id, stage, attempt)`
 依然工作，所以无编排 issue 的重试计数照常。
 
 无编排的 run **恒为 `kind='agent'`**。`job` 必须有 `command`，而 command 只能来自 workflow 定义 ——
@@ -579,7 +596,10 @@ issue 停在 `active`，`current_stage` 指向那个 stage，但没有活跃 run
 daemon 上线后补派。
 
 「待派发」不需要新字段，它是派生的：`status='active'` + `current_stage` 非空
-+ 无活跃 run + `stage.kind != 'gate'`。
++ `awaiting_gate` 为空 + 无活跃 run。
+
+gate 阶段同样没有 run，不排除它，一张正在等人审的单子就会被当成待派发 ——
+daemon 每次重连都补派一遍，而那里根本没有要派的活。
 
 ```python
 def on_runtime_online(runtime_id):
@@ -654,16 +674,18 @@ on_failure:
 只把 `current_stage` 改回去重跑，agent 看到的输入和上次一样，会生成几乎一样的脚本。
 三轮之后 token 烧完，结论是「搞不定」。
 
-`run.inputs` 必须带三样：
+`run.inputs` 必须带这四样（首次执行时 `replaces` 为空）：
 
 ```json
 {
   "base": { "artifact_id": 412, "hash": "sha256:9f3a..." },
+  "replaces": { "artifact_id": 418, "hash": "sha256:7c10..." },
   "feedback": {
     "from_run": 887,
     "error_class": "script_bug",
     "signal": "AssertionError: LBA 0x1a2f expect 0x00 got 0x47",
-    "log_artifact": 915
+    "log_artifact": 915,
+    "note": "断言写死了物理偏移 0x1a2f，FTL 重映射后必然失败"
   },
   "constraints": [
     "只改断言与重试逻辑",
@@ -672,6 +694,14 @@ on_failure:
   ]
 }
 ```
+
+`base` 与 `replaces` 是两个位置，不能合成一个：`base` 是本 stage 的上游输入（用例），
+`replaces` 是本 stage 自己的上一版（要被换掉的脚本）。回退时两者都要指 ——
+只给 `base`，agent 要么整篇重写（上一轮 review 结论作废），要么自己扫 `artifact` 表找
+「本 stage 最新一条」（契约留给自觉，换个实现就读错版本）。
+
+`feedback` 里 `note` 与 `signal` 分开：`signal` 是日志给的定位，`note` 是人打回时写的方向。
+两者可能只有其一 —— 环境失败没有 note，人打回没有 signal。
 
 `constraints` 比 feedback 更重要。没有它，agent 回退时会顺手改用例，
 问题从「脚本错了」变成「用例被悄悄改了」，上一轮 review 的结论直接作废。
@@ -698,6 +728,12 @@ SQLite 没有 `= ANY(array)`，下游阶段列表在应用层拼成 `IN (?, ?, .
 
 推进时 `stage_driver` 检查：正向推进遇到 `stale=1` 的产物，**必须重走该阶段**，不能跳。
 这是「重入式工作流」：回退只重跑受影响的下游。
+
+只标**已存在**的行。回退发生在新版本产出之前，v3 那时还不存在；若实现成「推进时按阶段标 stale」，
+刚产出的新产物会被自己标掉，此后每次推进都判 stale，直接死循环。
+
+gate 不在这个范围内：它不产 artifact，而回退之后再推进到它时会重新开闸 ——
+「这个门通过没有」不需要持久化，`event(type='gate_approved')` 里查得到。
 
 ---
 
@@ -912,13 +948,17 @@ UPDATE issue SET title = ?, version = version + 1, updated_at = ?
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | `GET` | `/api/runtime/stream?runtime_id=` | SSE，推送本 runtime 的 job |
-| `POST` | `/api/runs/:id/claim` | CAS 认领，返回 `claim_token` + `inputs` |
+| `POST` | `/api/runs/:id/claim` | CAS 认领，返回 `claim_token` + `inputs` + `budget`（本单剩余额度） |
 | `POST` | `/api/runs/:id/heartbeat` | 心跳 |
 | `POST` | `/api/runs/:id/events` | 批量上报（≤200 条/次） |
 | `POST` | `/api/runs/:id/complete` | `{status: succeeded\|failed, error_class?, artifacts?: [], usage}` |
-| `POST` | `/api/issues/:id/block` | 声明阻塞（如权限不足），由后端转 blocked |
+| `POST` | `/api/runs/:id/block` | 声明阻塞（如权限不足），由后端转 blocked |
 
 `complete` 里提交的是 `error_class`（枚举），不是「回退到哪个阶段」。路由由后端按 workflow 定义决定。
+
+`artifacts` 里给的是 workspace 相对路径（`out/case_10.py`）或外部 URL（PR），**不是**最终的
+`content_ref`：后端把它搬进 `artifacts/{issue}/{stage}/v{n}/`、算 hash、分配版本号，再落库。
+让 agent 拼版本目录或算 hash，一定会和 daemon 撞车。
 
 ### 7.3 两个 SSE 端点，同一套机制
 
@@ -977,6 +1017,9 @@ daemon 上报事件同理要攒批：本地缓冲，200ms 或 50 条刷一次，
 ```
 
 三个数字答的是同一个问题：这张单子总共还能烧多少。任一超限 → issue `blocked`、写 event、进 inbox。
+
+派发时下发给 agent 的 `budget` 是**本单剩余额度**（`max_*` 减去已用），不是本次 run 的配额 ——
+否则 agent 会以为每轮都有新额度，回退几次就没人收尾了。
 
 `agent` run 计 `tokens_in + tokens_out` 与墙钟；`job` run 只计墙钟、token 恒为 0 ——
 这样「跑了一整天」的 job 也能被 `max_wall_clock_s` 抓住。
@@ -1079,12 +1122,16 @@ sqlite3 data/app.db "VACUUM INTO 'backup/app-$(date +%F).db'"
 | run failed | `counts=true`，已超限 | `status = blocked` |
 | run failed | `counts=false`（env） | `current_stage` 不变，新建同 stage 的 run（attempt+1） |
 | gate approved | 非末阶段 | `current_stage = next`，清 `awaiting_gate` |
-| gate rejected | 带 `back_to` | `current_stage = back_to`，标下游 stale，清 `awaiting_gate` |
+| gate approved | 末阶段 | `status = done`，`current_stage` 保持末阶段 |
+| gate rejected | 带 `back_to` | `current_stage = back_to`，标下游 stale，清 `awaiting_gate`，不计 `stage_attempts` |
 | gate rejected | 未带 `back_to` | 拒绝请求，400 |
 | 任意推进 | 存在活跃 run | 拒绝派发，等待现有 run 结束 |
 | 任意派发 | 路由有候选 | 按排序选一个，trace 存进 `run.route`，建 run |
 | 任意派发 | 路由无候选 | **不建 run**，写 `route_pending`，issue 保持 `active` |
 | daemon 上线 | 存在「有 stage 无 run」的 issue | 逐个补派；仍无候选则继续等 |
+
+gate rejected 不计 `stage_attempts`：那个计数记的是「机器在这个 stage 上失败了几次」，
+人的打回不是机器失败。反复打回的代价是 token，由 `max_runs` 与预算兜住。
 
 ### 11.1 目录结构
 
@@ -1132,6 +1179,5 @@ issue 与工作流管理（**workflow 可选**：有编排走多阶段与回退�
 | 成本看板 | 数字记在 `run` 表里，需要时写条 SQL 查。先不做图 |
 | IM 通知 | inbox 页够看。真需要时加一个 webhook，是半天的事 |
 | 可视化工作流编辑器 | YAML 手写 + 启动校验报错，比拖拽编辑器更快定位问题 |
-| 微服务拆分 | 单进程能扛住 2–5 人的负载，拆分只会让调试变难 |
 
 这些边界不是「以后再做」，而是**当前规模下不该做**。约束比选项更能保证项目跑得动。

@@ -127,9 +127,10 @@ artifact（第 1 条）：
 一次 `complete` 写了四张表：`run` 置 succeeded、`artifact` 插入、`event` 追加、`issue` 推进。
 在 SQLite 里这是一个 `BEGIN IMMEDIATE` 包住的四次写，**不可能只写一半**。
 
-### S4 · 派发 gen_script：亲和优先，选回同一台机器
+### S4 · 派发 gen_script：只剩一个候选，能力匹配单独决定
 
-> requires=[script,python]，只有 actor 3 满足。
+> requires=[script,python]。actor 2 缺 `script`，actor 4 缺 `python`，只剩 actor 3 ——
+> 亲和与负载比这一轮都没有机会参与排序。
 
 
 run（第 2 条）：
@@ -147,6 +148,7 @@ run（第 2 条）：
     "hash": "sha256:9ba19826294d",
     "ref": "artifacts/10/gen_case/v1/testcase.md"
   },
+  "replaces": null,
   "feedback": null,
   "constraints": [
     "脚本入口固定 tests/case_10.py",
@@ -219,12 +221,17 @@ run（第 3 条）：
     "hash": "sha256:9ba19826294d",
     "ref": "artifacts/10/gen_case/v1/testcase.md"
   },
+  "replaces": {
+    "artifact_id": 2,
+    "hash": "sha256:122da8dcb0d4",
+    "ref": "artifacts/10/gen_script/v1/case_10.py"
+  },
   "feedback": {
     "from_run": 2,
     "error_class": "script_bug",
     "signal": "AssertionError: LBA 0x1a2f expect 0x00 got 0x47 — 该 LBA 已被 FTL 重映射",
     "log_artifact": null,
-    "review_note": "断言写死了物理偏移 0x1a2f，FTL 重映射后必然失败"
+    "note": "断言写死了物理偏移 0x1a2f，FTL 重映射后必然失败"
   },
   "constraints": [
     "只改断言与重试逻辑",
@@ -340,6 +347,10 @@ run（第 6 条）：
   "base": {
     "artifact_id": 1,
     "hash": "sha256:9ba19826294d"
+  },
+  "replaces": {
+    "artifact_id": 3,
+    "hash": "sha256:4e71c0a93b28"
   },
   "feedback": {
     "from_run": 5,
@@ -486,6 +497,7 @@ issue（仍是 active，stage 停在 run）：
 SELECT id FROM issue
  WHERE status = 'active'
    AND current_stage IS NOT NULL
+   AND awaiting_gate IS NULL
    AND id NOT IN (SELECT issue_id FROM run
                   WHERE status IN ('queued','claimed','running'));
 ```
@@ -498,6 +510,10 @@ SELECT id FROM issue
 | 11 |
 
 命中 issue 11，不命中 issue 10（它已 done）。daemon 上线后跑一次这个查询，逐个补派。
+
+`awaiting_gate IS NULL` 这一条不能省：S1–S2 那段人审期间，issue 10 的前三个条件全部成立
+（`run` 表是空的），只有它能把「在等人」和「在等机器」分开。少了它，daemon 每次重连都会
+把等人的单子补派一遍。
 如果把「没人接」也写成 `failed`，运维看到的就是一堆假失败 —— 而它其实会自愈。
 
 ---
@@ -509,7 +525,8 @@ SELECT id FROM issue
 **撑得住。** 这条流程的每一个中间状态都能在六张表里找到落点，没有一处需要「再多存点什么」才能表达。
 6 个阶段、7 次执行、2 次回退、2 类失败，全部落在既有字段上。
 
-但推演过程中有 **9 处文档没写死**，其中 **3 处不同的人会写出不同实现**。下面按「会不会导致实现分歧」排序。
+推演过程中有 **9 处没写死** —— 不是设计错误，是没写到那么细，而这几处恰好都在「两个组件交接」的位置上，
+最容易各写一套然后对不上。下面先列撑住的部分，再逐条给出 DESIGN.md 现在的定法。
 
 ### 一、撑住了的部分，以及证据
 
@@ -530,58 +547,25 @@ SELECT id FROM issue
 其中第 1 条和第 2 条是整份设计的地基，这次都验证到了：**gate 期间 `run` 表是空的**，
 所以「人审三天被杀掉」这类问题在这个模型里根本不存在。
 
-### 二、必须补的 3 处（会导致实现分歧）
+### 二、推演暴露的 9 处，以及现在的定法
 
-#### 1 · `artifact.version` 没有生成规则
+| # | 当时的空白 | 现在的定法 | 位置 |
+|---|---|---|---|
+| 1 | `artifact.version` 从哪来 | `MAX(version)+1`，与插入在同一个 `BEGIN IMMEDIATE` 里算。`COUNT(*)+1` 删过行就撞唯一键 | §4.4 |
+| 2 | `run.inputs` 装不下两个上游 | 加 `replaces`：`base` 是上游输入，`replaces` 是本 stage 上一版。S7 那次回退两者都要指 | §5.4 |
+| 3 | 人打回写的意见没有位置 | `feedback.note`。`signal` / `log_artifact` 是日志给的定位，`note` 是人给的方向，两者可能只有其一 | §5.4 |
+| 4 | gate 通过的结论没有载体 | 不补。回退后再推进到该阶段会重新开闸，门的结论不需要持久化；要查就看 `gate_approved` 事件 | §5.5 |
+| 5 | gate rejected 计不计次 | 不计。`stage_attempts` 记的是「机器失败第几次」，人打回的代价是 token，由 `max_runs` 兜住 | §11 |
+| 6 | 末阶段 approve 写什么 | `status = done`，`current_stage` 保持末阶段 | §11 |
+| 7 | stale 传播的作用范围 | 只标已存在的行。写成「推进时按阶段标」会把刚产出的新版自己标掉，此后永远判 stale | §5.5 |
+| 8 | `event.type` 没有全集 | 12 个类型进文档，表上仍不加 `CHECK` —— 事实流加枚举，等于记一条新事实要改表结构 | §4.1 |
+| 9 | `__single__` 可能与真实 stage 重名 | 启动期校验，撞上就拒绝启动 | §4.8 |
 
-表上只有 `UNIQUE(issue_id, stage, version)`，文档没写 `version` 从哪来。
-两个人会写出两种：`COUNT(*)+1`（删过行就撞）与 `MAX(version)+1`。
-而且它必须和插入在**同一个 `BEGIN IMMEDIATE` 事务**里算，否则两个 daemon 同时交付时
-会读到同一个 `MAX`，第二条插入直接 500 —— 而这类冲突只在并发时出现，本地测不出来。
+第 4 条是推演时判重了。当时看「没有任何 SQL 能回答『这个阶段审过没有』」，像是缺一个存结论的地方；
+实际不需要这个能力 —— 门是「进入即重开」的，回退之后必然重走一遍，
+而「审过没有」在事件流里本来就有记录，只是不在表里。
 
-→ 建议在 §4.4 补一句：`version = MAX(version)+1`，与插入同事务计算。
-
-#### 2 · `run.inputs.base` 是单数，容不下两个上游
-
-S7 的回退里，`gen_script` 同时依赖两个产物：`testcase v1`（上游，没变）和 `script v1`（自己上一版，要被替换）。
-文档的 `base` 是一个对象，只能指一个 artifact。推演里我只放了 `testcase`，
-**上一版脚本没有引用位置** —— agent 只能自己扫 `artifact` 表找「该 stage 最新一条」。
-
-这等于把契约的一部分留给了 agent 的自觉。换一个 agent 实现就可能读错版本。
-
-→ 建议 `base` 改成数组，或加一个 `replaces: {artifact_id}`。
-
-#### 3 · gate 的结论没有存放位置
-
-S8 之后 `review_script` 已经通过，但这件事**只存在于 `event(type=gate_approved)`**。
-S10 回退时那句 `UPDATE artifact SET stale = 1` 标不到它 —— 事件是 append-only，不能改也不该改。
-
-后果：没有任何一条 SQL 能回答「当前阶段是否已被审过」，看板要回答这个问题只能回放事件流。
-本设计里 `artifact.kind` 有 `review_note`，但 gate 既不建 run、也不产 artifact，这个 kind 目前没有生产者。
-
-→ 建议二选一：让 gate 产生 `artifact(kind='review_note', produced_by=NULL)`，给 stale 传播一个对象；
-或在 issue 上加 `gate_passed` JSON，由 `stage_driver` 维护。
-
-### 三、建议补的 4 处（容易各写一套）
-
-| 位置 | 缺什么 | 推演里的表现 |
-|---|---|---|
-| §11 的 gate rejected 行 | 没有计数字段 | S6 人审打回后 `stage_attempts` 仍是 `{}`。人可以无限打回，而 agent 失败 3 次就 blocked —— 不对称 |
-| §11 的 gate approved 行 | 只写了「非末阶段」 | 末阶段 approve 该写什么没定义。我按 §3.1 让 `current_stage` 停在 `review_result`，另一个人很可能写成 `__done__` |
-| §5.5 stale 传播 | 没写「只对已存在行生效」 | 若实现成「推进时按阶段标 stale」，新生成的 v3 会被自己标掉，之后每次推进都判 stale —— 死循环 |
-| §5.3 的 feedback 结构 | 只有 `signal` / `log_artifact` | 人打回时写的意见无处可放。推演里我加了 `review_note` 字段，**文档里没有这个字段** |
-
-第一条值得单独说：`stage_attempts` 的语义是「**计入的失败**次数」，不是「执行次数」。
-S6 打回后它是 0，S10 失败后才变 1，而 `gen_script` 实际跑了 3 次。三个数字互不相同，都需要明确。
-
-### 四、可选补的 2 处
-
-| 位置 | 情况 |
-|---|---|
-| `event.type` 没有枚举约束 | 25 条事件里出现了 **11 种** type，表上没有 `CHECK`，前端只能靠字符串匹配 |
-| `run.stage = '__single__'` | 如果谁把某个 stage 命名为 `__single__`，语义会撞车。加一条启动期校验即可 |
-
-### 五、一条文档没明说、但结论正确的推断
+### 三、一条文档没直说、但结论正确的推断
 
 预算按 `run` 表求和，意味着**只统计执行时间**。这次实际执行 3,538s（59 分钟），
 而日历时间跨了 1 小时 49 分钟 —— 差的那 50 分钟是人审与排队。也就是说**等人不花预算**。
@@ -596,10 +580,10 @@ S6 打回后它是 0，S10 失败后才变 1，而 `gen_script` 实际跑了 3 �
 | 维度 | 判定 |
 |---|---|
 | 能否完整表达这条流程 | 能。所有中间状态都有落点，无需额外字段 |
-| 字段是否够用 | 够，但 `inputs` 与 gate 结论各缺一块 |
+| 字段是否够用 | 够。推演时缺 3 个位置（版本规则、`replaces`、`feedback.note`），都已补进 DESIGN |
 | 约束是否可靠 | 三个关键约束（UNIQUE、复合外键、CHECK）实测都生效 |
-| 需要补写的地方 | 3 处必补、4 处建议、2 处可选 |
+| 需要补写的地方 | 9 处都已写死；其中 1 处（gate 结论载体）推演后确认不用补 |
 
-真正会让人写错的是第二节那三条：版本号怎么生成、上游产物怎么引用、人审结论存在哪。
-它们不是设计错误，是设计**没写到那么细**——而这三处恰好都在「两个组件交接」的位置上，
+真正会让人写错的是第二节前三条：版本号怎么生成、上游产物怎么引用、人审意见放在哪。
+它们不是设计错误，是设计**没写到那么细** —— 而这三处恰好都在「两个组件交接」的位置上，
 最容易各写一套然后对不上。
