@@ -365,14 +365,8 @@ INSERT INTO workflow (id, version, spec, spec_hash, created_at) VALUES (?, ?, ?,
 `stage_driver` 读定义时，**用 issue 自己那条 `(workflow_id, workflow_version)`**，
 不是内存里的最新版。这样改 YAML 只影响新建的 issue，在途的按原定义走完。
 
-把在途 issue 迁到新版本是一个**显式动作**，不是改文件后的副作用：
-
-```
-POST /api/issues/:id/workflow   { "workflow_version": 2 }
-```
-
-后端校验 `current_stage` 在新定义里存在、且新定义能走完剩余阶段，才允许迁移；否则 409 并说明冲突在哪。
-隐式迁移看起来省事，实际上等于允许「改配置文件远程修改所有在途单据的状态机」。
+在途 issue 一律按自己的版本跑完，不跟随新版本。要换流程就**新建一张单子** ——
+写一个「校验新定义能接住老进度」的迁移器，成本远高于它省下的那点手工，而且迁移器自己就是新的出错点。
 
 ### 4.8 issue 有两种形态：有编排 / 无编排
 
@@ -509,28 +503,42 @@ stage 上的 `requires` 是**能力标签**，不写具体 agent —— 派发�
 - 某个 agent 挂了，凡是指向它的 stage 全部卡住，而它本来换一台机器就能跑。
 - 同一个 stage 无法被多台机器分担 —— 单张 issue 是串行的，但十张 issue 应该能并行。
 
-**保留一个逃生口**：stage 上写 `assignee: agent-qa` 就跳过路由直接指定。写死是例外，不是默认。
+想固定某个 agent，就给它一个独一无二的能力标签（如 `qa-only`），stage 上 `requires: [qa-only]` 即可 ——
+同一件事不设两条路径，路由也就不用为绕过分支多写一套测试。
 
 ```mermaid
 flowchart TD
-    A["stage.requires"] --> B{"写了 assignee?"}
-    B -->|"有"| C["直接用，跳过路由"]
-    B -->|"无"| D["候选 = kind='agent' 全部"]
+    A["stage.requires"] --> D["候选 = kind='agent' 全部"]
     D --> E{"capabilities ⊇ requires"}
     E -->|"否"| R1["rejected: missing:tag"]
     E -->|"是"| F{"runtime 在线"}
     F -->|"否"| R2["rejected: offline"]
     F -->|"是"| G{"running < max_parallel"}
     G -->|"否"| R3["rejected: busy"]
-    G -->|"是"| H{"熔断冷却中"}
-    H -->|"是"| R4["rejected: cooling"]
-    H -->|"否"| I["排序：亲和 > 负载 > 成功率 > id"]
+    G -->|"是"| I["排序：亲和 > 负载比 > id"]
     I --> J{"候选非空?"}
     J -->|"否"| K["不建 run<br/>写 route_pending"]
     J -->|"是"| L["建 run<br/>trace 存进 run.route"]
 ```
 
-#### 一、候选过滤：五个条件同时满足
+派发只是 `stage_driver` 里的一个函数，不是独立服务：
+
+```python
+def dispatch(issue, stage):
+    st = get_stage(issue, stage)
+    actor, trace = route(issue, st)             # 纯函数，不写库
+    if actor is None:
+        emit(issue, 'route_pending',
+             {'stage': stage, 'requires': st.requires, 'trace': trace})
+        return
+    run = create_run(issue, stage, actor, trace)   # 与 emit 同一事务
+    notify_runtime(actor.runtime_id, run)
+```
+
+`route()` 只读状态、只返回结果，因此**任何一次派发都能离线重放**。它不调用模型 ——
+路由一旦需要模型判断，就再也无法解释清楚为什么派给了谁。
+
+#### 一、候选过滤：四个条件同时满足
 
 | 条件 | 不满足时的 `rejected` 标记 |
 |---|---|
@@ -538,7 +546,6 @@ flowchart TD
 | `capabilities ⊇ requires` | `missing:<tag>` |
 | runtime 在线 | `offline` |
 | 并发未满：`running < max_parallel` | `busy` |
-| 不在熔断冷却期 | `cooling` |
 
 在线状态**不落库**。daemon 与后端之间是一条常驻 SSE 连接，连接本身就等于在线信号，
 进程内维护 `online: dict[runtime_id, conn_count]` 即可。这与第 8 章「不建 runtime 表」一致：
@@ -552,12 +559,11 @@ flowchart TD
 #### 二、排序：必须确定性
 
 同一组输入必须选出同一个 agent。随机选会带来「同一个 issue 重跑两次派到两台机器」，
-出了问题无法复现。排序键只有四个，依次比较：
+出了问题无法复现。排序键只有三个，依次比较（候选通常只有一两个，再加键也分不出高下）：
 
 ```
 亲和（同 issue 上次机器 run 的 actor）
   > 负载比 running / max_parallel 低
-  > 近 20 次 run 成功率高
   > actor.id 小
 ```
 
@@ -593,7 +599,7 @@ def on_runtime_online(runtime_id):
   "rule": "affinity",
   "requires": ["script", "python"],
   "candidates": [7, 3, 9],
-  "rejected": { "5": "cooling", "8": "busy", "2": "missing:python" },
+  "rejected": { "5": "offline", "8": "busy", "2": "missing:python" },
   "chosen": 7
 }
 ```
@@ -601,19 +607,7 @@ def on_runtime_online(runtime_id):
 agent 一多，「为什么派给它」是第一个被问到、且**唯一无法从其他数据反推**的问题。
 没有这份记录就只能猜。
 
-#### 五、熔断：从 run 表算，不建表
-
-某 actor 最近 3 次结束的 run 全部 `failed` 且 `error_class != 'env'` → 冷却 10 分钟。
-
-```sql
-SELECT status, error_class, ended_at FROM run
- WHERE actor_id = ? AND status IN ('succeeded','failed')
- ORDER BY id DESC LIMIT 3
-```
-
-`env` 不算，因为那是目标机的问题、不是这个 agent 的问题 —— 与 5.3 的失败分类同一条逻辑。
-
-#### 六、全自动到 done
+#### 五、全自动到 done
 
 不需要任何新机制：**写一个没有 gate 的 workflow 就是全自动。**
 
@@ -640,23 +634,6 @@ on_failure:
 
 `unknown` 在全自动工作流里必须保留 `block: true`。全自动最危险的不是失败，是
 「agent 认为自己成功了但实际做错了」；判不清就停下，比自动往下走安全。
-
-#### 七、router 是 driver 内部的一个函数
-
-```python
-def dispatch(issue, stage):
-    st = get_stage(issue, stage)
-    actor, trace = route(issue, st)             # 纯函数，不写库
-    if actor is None:
-        emit(issue, 'route_pending',
-             {'stage': stage, 'requires': st.requires, 'trace': trace})
-        return
-    run = create_run(issue, stage, actor, trace)   # 与 emit 同一事务
-    notify_runtime(actor.runtime_id, run)
-```
-
-`route()` 只读状态、只返回结果，因此**任何一次派发都能离线重放**。
-它不是独立服务，也不调用模型 —— 路由一旦需要模型判断，就再也无法解释清楚为什么派给了谁。
 
 ### 5.3 失败路由表
 
@@ -726,13 +703,12 @@ SQLite 没有 `= ANY(array)`，下游阶段列表在应用层拼成 `IN (?, ?, .
 
 ## 6. 核心流程与一致性
 
-### 6.1 两个循环
-
-**gate 循环**：后端开启 gate → issue 标黄进 inbox → 人 approve / reject →
-`stage_driver` 推进或回退。不产生 run，不会超时。
+### 6.1 只有一个循环
 
 **run 循环**：后端派发 → SSE 下行 → daemon CAS 认领 → 沙箱执行 →
 批量上报事件 + 心跳 → `complete` → `stage_driver` 推进或按路由回退。
+
+gate 不构成循环 —— 它是一次人点击，不超时、不回收、不心跳（见 3）。
 
 ### 6.2 派发只需一行 CAS
 
@@ -895,9 +871,8 @@ def on_run_finished(run):
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| `GET` | `/api/issues?status=&stage=&workflow=&mine=` | 看板列数据（列 = workflow 的 stage） |
+| `GET` | `/api/issues?status=&stage=&workflow=&mine=` | 看板列数据（列 = workflow 的 stage）；`workflow=none` 取「直接任务」列表 |
 | `POST` | `/api/issues` | 建 issue。`workflow_id` 可选，省略 = 无编排，`current_stage` 为 NULL |
-| `GET` | `/api/issues?unplanned=1` | 「直接任务」列表：`workflow_id IS NULL` 的 issue |
 | `PATCH` | `/api/issues/:id` | 改标题/指派，走 `If-Match: version` |
 | `POST` | `/api/issues/:id/comment` | 写 `event(type='comment')` |
 | `GET` | `/api/issues/:id/events?after=` | 历史回放 + 增量拉取 |
@@ -905,14 +880,13 @@ def on_run_finished(run):
 | `POST` | `/api/issues/:id/gate` | **gate 操作**：`{stage, action: approve\|reject, note, back_to?}` |
 | `GET` | `/api/issues/:id/stream` | SSE，实时事件与进度 |
 | `GET` | `/api/inbox` | 所有 `awaiting_gate` 非空的 issue |
-| `GET` | `/api/workflows/:id` | 阶段图定义：看板列顺序、gate 名称。默认取最新版本 |
-| `POST` | `/api/issues/:id/workflow` | 显式迁移到指定版本，校验冲突则 409 |
-| `GET` | `/api/actors` | agent 清单：`capabilities`、`max_parallel`、是否在线、当前负载、是否冷却 |
+| `GET` | `/api/workflows/:id` | 阶段图定义：看板列顺序、gate 名称、每个 stage 当前有无 agent 可接。默认取最新版本 |
+| `GET` | `/api/actors` | agent 清单：`capabilities`、`max_parallel`、是否在线、当前负载 |
 | `POST` | `/api/actors` | 注册 agent：`{name, runtime_id, capabilities, max_parallel}`，`kind` 固定 `agent` |
 | `PATCH` | `/api/actors/:id` | 改能力标签或并发数。只影响之后的派发，不改已发出的 run |
-| `GET` | `/api/runs/:id/route` | 该次派发的完整决策 trace（`run.route` 原样返回） |
 
 `gate` 动作是唯一的人侧状态变更入口。`reject` 必须带 `back_to`，否则后端无法判断回退目标。
+派发决策 trace 就是 `run.route` 这一列，随 issue 详情一起返回 —— 不为它单开一个端点。
 
 前端渲染看板时先拉 `/api/workflows/:id` 拿列顺序，再拉 `/api/issues` 拿卡片 ——
 **列不是写死的**，加一个 stage 只改 YAML，前端不用动。
@@ -963,11 +937,8 @@ broadcast(issue_id, event)     # 进程内，按 issue_id 分发给所有订阅�
 游标用 `event.id`，客户端断线重连带 `Last-Event-ID` 即可补齐。补齐时查
 `SELECT * FROM event WHERE issue_id = ? AND id > ? ORDER BY id`，走 `idx_event_issue` 索引。
 
-### 7.4 事件上报批量 + 游标
-
-daemon 本地缓冲，200ms 或 50 条刷一次，单次上限 200 条。不要一条一请求 ——
-每次上报都是一个 `BEGIN IMMEDIATE`，一条一请求会把写锁排队放大两个数量级。
-
+daemon 上报事件同理要攒批：本地缓冲，200ms 或 50 条刷一次，单次上限 200 条。
+不要一条一请求 —— 每次上报都是一个 `BEGIN IMMEDIATE`，一条一请求会把写锁排队放大两个数量级。
 一次批量上报 = 一个事务：`executemany` 插 N 条 event，一次 COMMIT，一次广播。
 
 ---
@@ -991,25 +962,24 @@ daemon 本地缓冲，200ms 或 50 条刷一次，单次上限 200 条。不要�
 
 ## 9. 预算闸门
 
-`job` 阶段没有 token 消耗，只按 token 算会漏掉「跑了一整天」；
-而回退会重开 run，只按单次 run 设限则回退越多额度越宽。所以预算必须分层。
+`job` 阶段没有 token 消耗，只按 token 算会漏掉「跑了一整天」；而回退会重开 run，
+按单次 run 设限则回退越多额度越宽。所以预算**只在 issue 上累加**，不看单次 run。
 
-### 9.1 两层预算
+### 9.1 issue 累计预算
 
 ```json
 // issue.budget —— 建单时由服务端从 config.toml 的 [budget.default] 展开写入
 {
   "max_tokens_total": 2000000,     // 整个 issue 累计，不随 run 重置
   "max_wall_clock_s": 86400,       // 整个 issue 累计
-  "max_tokens_per_run": 200000,
   "max_runs": 20
 }
 ```
 
-| 层级 | 作用 | 超限后果 |
-|---|---|---|
-| per-run | 防止单次跑飞 | run failed, `error_class=budget` |
-| per-issue 累计 | 防止回退刷额度 | issue → blocked |
+三个数字答的是同一个问题：这张单子总共还能烧多少。任一超限 → issue `blocked`、写 event、进 inbox。
+
+`agent` run 计 `tokens_in + tokens_out` 与墙钟；`job` run 只计墙钟、token 恒为 0 ——
+这样「跑了一整天」的 job 也能被 `max_wall_clock_s` 抓住。
 
 `issue.budget` 的列默认值是 `{}`，但**空对象不等于「无限制」** —— 建单时把
 `config.toml` 的默认预算展开写进去，`{}` 只在读旧数据时兜底成默认值。
@@ -1020,26 +990,19 @@ daemon 本地缓冲，200ms 或 50 条刷一次，单次上限 200 条。不要�
 累计值不单独存字段，直接对 `run` 表求和：
 
 ```sql
-SELECT COALESCE(SUM(tokens_in + tokens_out), 0) AS used,
+SELECT COUNT(*) AS runs,
+       COALESCE(SUM(tokens_in + tokens_out), 0) AS used,
        COALESCE(SUM(wall_clock_s), 0)           AS spent
   FROM run WHERE issue_id = ?;
 ```
 
 走 `idx_run_issue` 索引，几十行的表，比维护一个容易不同步的累加字段可靠。
 
-### 9.2 按 kind 计费
-
-- `agent` run：计 `tokens_in + tokens_out`，同时计墙钟
-- `job` run：只计墙钟，token 恒为 0
-
-`job` 阶段「跑了一整天」必须能被 `max_wall_clock_s` 抓住。
-
-### 9.3 三道防死循环闸
+### 9.2 两道防死循环闸
 
 1. **阶段级计数**：`stage_attempts[stage] >= max_stage_attempts` → `blocked`，写 event，进 inbox。
    阈值有编排时取 YAML，无编排时取 `config.toml` 的 `[limits] max_stage_attempts` —— 后者只是兜底，不是第二份定义
-2. **产物去重**：新 artifact 的 `content_hash` 与上一版相同 → 直接判 `failed`，不进运行，event 提示「上一轮反馈未被采纳」
-3. **run 数上限**：`COUNT(*) FROM run WHERE issue_id = ?` 超过 `max_runs` → `blocked`。
+2. **run 数上限**：`COUNT(*) FROM run WHERE issue_id = ?` 超过 `max_runs` → `blocked`。
    `env` 类重试不计次，所以这一道防的正是「环境一直不好、无限重跑」
 
 ---
@@ -1066,17 +1029,13 @@ SELECT COALESCE(SUM(tokens_in + tokens_out), 0) AS used,
 配置只有一个 `config.toml`：各 runtime 的 token、建单默认预算、无编排用的阶段失败上限。
 用标准库 `tomllib` 启动时读一次，不引配置库 —— 需要热更新的配置项，这个系统一个都没有。
 
-**为什么不用 ORM**：六张表、十几条查询，SQLAlchemy 的模型声明会比 SQL 本身更长；
-而且 `BEGIN IMMEDIATE` 和 `PRAGMA` 这类 SQLite 特有的操作，最终还是要落到原生 SQL。
-不如一开始就写 SQL，`store.py` 一个文件装得下全部。
+**为什么不用 ORM 和异步驱动**：六张表、十几条查询，SQLAlchemy 的模型声明会比 SQL 本身更长，
+而 `BEGIN IMMEDIATE`、`PRAGMA` 这类 SQLite 特有操作最终还是要落回原生 SQL。
+`aiosqlite` 同理 —— `sqlite3` 是微秒级的本地 C 调用，包一层异步只多一层线程和一层 await，
+并没有真的并行。把路由声明成 `def`（不是 `async def`），FastAPI 会自己丢线程池，事件循环不会阻塞。
 
-**为什么不用 aiosqlite**：`sqlite3` 的调用是微秒级的本地 C 调用，包一层异步驱动只是增加了
-一层线程和一层 await，并没有真的并行。正确做法是把路由声明为 `def`（不是 `async def`），
-FastAPI 会自动丢到线程池执行，事件循环不会被阻塞。
-
-**为什么不用 Alembic**：SQLite 的 `ALTER TABLE` 支持有限（不能删列、不能改列类型），
-框架生成的回滚脚本大概率是「建新表、拷数据、改名」。与其让框架生成一堆看不懂的迁移，
-不如手写三段 SQL，配 `PRAGMA user_version` 记版本号。
+**为什么不用迁移框架**：SQLite 的 `ALTER TABLE` 不能删列、不能改列类型，框架生成的回滚脚本
+大概率是「建新表、拷数据、改名」。不如手写三段 SQL，配 `PRAGMA user_version` 记版本号。
 
 **备份**：不要 `cp app.db`。WAL 模式下数据还可能在 `-wal` 文件里，单独拷主文件会丢最近的事务。
 用一条 SQL：
@@ -1096,7 +1055,7 @@ sqlite3 data/app.db "VACUUM INTO 'backup/app-$(date +%F).db'"
 | 1 | 存储层 | `schema.sql`、连接工厂、`PRAGMA`、`write_tx()`、`user_version` 迁移 | `store.py`, `schema.sql` |
 | 2 | workflow 快照 | YAML 解析 + 启动期结构校验（闭环、可达性）+ 哈希入库，旧版本永不覆盖 | `workflow.py` |
 | 3 | `stage_driver` | **核心**：推进 / 回退 / 失效传播 / 计数闸门 | `driver.py` |
-| 4 | router | 候选过滤 / 确定性排序 / 熔断 / trace 落库 | `router.py` |
+| 4 | router | 候选过滤 / 确定性排序 / trace 落库 | `router.py` |
 | 5 | issue API | CRUD、gate 动作、inbox 查询 | `api/issues.py` |
 | 6 | run API | claim / heartbeat / events / complete / block | `api/runs.py` |
 | 7 | 事件流 | SSE handler、进程内广播、游标补齐、daemon 上线补派 | `sse.py` |
@@ -1123,7 +1082,6 @@ sqlite3 data/app.db "VACUUM INTO 'backup/app-$(date +%F).db'"
 | gate rejected | 带 `back_to` | `current_stage = back_to`，标下游 stale，清 `awaiting_gate` |
 | gate rejected | 未带 `back_to` | 拒绝请求，400 |
 | 任意推进 | 存在活跃 run | 拒绝派发，等待现有 run 结束 |
-| 任意派发 | stage 写了 `assignee` | 跳过路由，直接用该 actor |
 | 任意派发 | 路由有候选 | 按排序选一个，trace 存进 `run.route`，建 run |
 | 任意派发 | 路由无候选 | **不建 run**，写 `route_pending`，issue 保持 `active` |
 | daemon 上线 | 存在「有 stage 无 run」的 issue | 逐个补派；仍无候选则继续等 |
@@ -1157,7 +1115,7 @@ workflows/testcase_v1.yaml
 ### 做什么
 
 issue 与工作流管理（**workflow 可选**：有编排走多阶段与回退，无编排就是单步或纯人工）、
-**多 agent 路由**（stage 声明能力，派发时按能力 / 在线 / 负载 / 熔断选 agent，决策落库）、
+**多 agent 路由**（stage 声明能力，派发时按能力 / 在线 / 负载选 agent，决策落库）、
 三类阶段（gate / agent / job）、失败分类与回退、产物版本与失效传播、
 实时进度、预算闸门、完整审计流。
 
@@ -1165,7 +1123,7 @@ issue 与工作流管理（**workflow 可选**：有编排走多阶段与回退�
 
 | 不做 | 原因 |
 |---|---|
-| 多实例 / 读写分离 | SQLite 单文件，多实例就要换 Postgres。而单进程广播、`BEGIN IMMEDIATE` 排队两个前提也会一起失效，等于换一套架构 |
+| 多实例 / 读写分离 / 微服务拆分 | SQLite 单文件，多实例就要换 Postgres。而单进程广播、`BEGIN IMMEDIATE` 排队两个前提也会一起失效，等于换一套架构 |
 | 技能库 / 向量检索 / 语义匹配 | 路由用精确的 `requires` 标签：能被解释、能离线重放。语义匹配每次都得出不同答案，也回答不了「为什么不选另一个」；重复任务靠 workflow 模板解决，不靠检索 |
 | 多项目 / 多租户 | 一个团队一个仓库。加项目维度会让每条查询都带 `project_id`，收益不成正比 |
 | 组织 / squad 层级 | 2–5 人不需要层级。`actor` 表里加个 `kind` 就能区分人和 agent |

@@ -435,7 +435,7 @@ max_stage_attempts: 3</code></pre>
   <h3>5.2 多 agent 路由</h3>
   <p>人建单，之后每一步由不同的 agent 接力 —— 这是常态。但从「常态」走到「在 YAML 里写死 agent 名」之间差一步：<strong>stage 声明要什么能力，派发那一刻才决定由谁来做。</strong></p>
   <p>写死名字的代价有三个，都很具体：加一个 agent 要改所有 workflow 文件，改漏一个就跑偏；某个 agent 挂了，凡是指向它的 stage 全部卡住，而它本来换一台机器就能跑；同一个 stage 无法被多台机器分担 —— 单张 issue 是串行的，但十张 issue 应该能并行。</p>
-  <p><strong>保留一个逃生口</strong>：stage 上写 <code>assignee: agent-qa</code> 就跳过路由直接指定。该 actor 不存在时不报错，按无候选处理（<code>route_pending</code> + <code>rejected: unknown_assignee</code>）—— 与 <code>requires</code> 同一个理由：配置不能因为一个未注册的名字就让服务起不来。</p>
+  <p>想固定某个 agent，就给它一个独一无二的能力标签（如 <code>qa-only</code>），stage 上 <code>requires: [qa-only]</code> 即可 —— 同一件事不设两条路径，路由也就不用为绕过分支多写一套测试。</p>
 
   <div class="fig">
     <svg viewBox="0 0 680 360" role="img" xmlns="http://www.w3.org/2000/svg" style="font-family:inherit">
@@ -478,7 +478,7 @@ max_stage_attempts: 3</code></pre>
       <line x1="340" y1="196" x2="340" y2="214" stroke="#888780" stroke-width="1.5" marker-end="url(#a4)"/>
 
       <rect x="170" y="218" width="340" height="44" rx="8" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="0.5"/>
-      <text x="340" y="240" text-anchor="middle" dominant-baseline="central" font-size="12" fill="#444441">排序：亲和 &gt; 负载 &gt; 成功率 &gt; id</text>
+      <text x="340" y="240" text-anchor="middle" dominant-baseline="central" font-size="12" fill="#444441">排序：亲和 &gt; 负载比 &gt; id</text>
 
       <line x1="340" y1="262" x2="340" y2="282" stroke="#888780" stroke-width="1.5"/>
       <line x1="185" y1="282" x2="495" y2="282" stroke="#888780" stroke-width="1.5"/>
@@ -498,7 +498,19 @@ max_stage_attempts: 3</code></pre>
     <div class="cap">图 4 · 能力 → 在线 → 负载 → 排序；无候选停在 route_pending，不判失败</div>
   </div>
 
-  <h4>一、候选过滤：五个条件同时满足</h4>
+  <p>派发只是 <code>stage_driver</code> 里的一个函数，不是独立服务：</p>
+<pre><code>def dispatch(issue, stage):
+    st = get_stage(issue, stage)
+    actor, trace = route(issue, st)             # 纯函数，不写库
+    if actor is None:
+        emit(issue, 'route_pending',
+             {'stage': stage, 'requires': st.requires, 'trace': trace})
+        return
+    run = create_run(issue, stage, actor, trace)   # 与 emit 同一事务
+    notify_runtime(actor.runtime_id, run)</code></pre>
+  <p><code>route()</code> 只读状态、只返回结果，因此<strong>任何一次派发都能离线重放</strong>。它不是独立服务，也不调用模型 —— 路由一旦需要模型判断，就再也无法解释清楚为什么派给了谁。</p>
+
+  <h4>一、候选过滤：四个条件同时满足</h4>
   <table>
     <thead><tr><th style="width:56%">条件</th><th>不满足时的 <code>rejected</code> 标记</th></tr></thead>
     <tbody>
@@ -506,17 +518,15 @@ max_stage_attempts: 3</code></pre>
       <tr><td><code>capabilities ⊇ requires</code></td><td><code>missing:&lt;tag&gt;</code></td></tr>
       <tr><td>runtime 在线</td><td><code>offline</code></td></tr>
       <tr><td>并发未满：<code>running &lt; max_parallel</code></td><td><code>busy</code></td></tr>
-      <tr><td>不在熔断冷却期</td><td><code>cooling</code></td></tr>
     </tbody>
   </table>
   <p>在线状态<strong>不落库</strong>。daemon 与后端之间是一条常驻 SSE 连接，连接本身就等于在线信号，进程内维护 <code>online: dict[runtime_id, conn_count]</code> 即可。这与第 8 章「不建 runtime 表」一致：重启后这个字典是空的，daemon 在几秒内重连，而重连会触发一次补派（见三）。</p>
   <p>一个 runtime 可以承载多个 agent（同一台机器上不同模型、不同工具链），它们的 <code>runtime_id</code> 相同，路由按 actor 算并发。<strong>不做 runtime 级总并发</strong> —— 一个 runtime 上通常只有两三个 agent，调小某个 actor 的 <code>max_parallel</code> 就能压住；两层配额在小规模下只会让人算不清。</p>
 
   <h4>二、排序：必须确定性</h4>
-  <p>同一组输入必须选出同一个 agent。随机选会带来「同一个 issue 重跑两次派到两台机器」，出了问题无法复现。排序键只有四个，依次比较：</p>
+  <p>同一组输入必须选出同一个 agent。随机选会带来「同一个 issue 重跑两次派到两台机器」，出了问题无法复现。排序键只有三个，依次比较（候选通常只有一两个，再加键也分不出高下）：</p>
 <pre><code>亲和（同 issue 上次机器 run 的 actor）
   &gt; 负载比 running / max_parallel 低
-  &gt; 近 20 次 run 成功率高
   &gt; actor.id 小</code></pre>
   <p>亲和排第一，因为<strong>上下文有成本</strong>：<code>gen_case</code> 在 A 机器跑过，A 上留有它刚拉的仓库和缓存；换到 B，产物拉得到，但中间过程丢了。这是「不同 agent 接力」最容易被忽略的隐性损耗。</p>
 
@@ -535,19 +545,12 @@ max_stage_attempts: 3</code></pre>
   "rule": "affinity",
   "requires": ["script", "python"],
   "candidates": [7, 3, 9],
-  "rejected": { "5": "cooling", "8": "busy", "2": "missing:python" },
+  "rejected": { "5": "offline", "8": "busy", "2": "missing:python" },
   "chosen": 7
 }</code></pre>
   <p>agent 一多，「为什么派给它」是第一个被问到、且<strong>唯一无法从其他数据反推</strong>的问题。没有这份记录就只能猜。</p>
 
-  <h4>五、熔断：从 run 表算，不建表</h4>
-  <p>某 actor 最近 3 次结束的 run 全部 <code>failed</code> 且 <code>error_class != 'env'</code> → 冷却 10 分钟。</p>
-<pre><code>SELECT status, error_class, ended_at FROM run
- WHERE actor_id = ? AND status IN ('succeeded','failed')
- ORDER BY id DESC LIMIT 3</code></pre>
-  <p><code>env</code> 不算，因为那是目标机的问题、不是这个 agent 的问题 —— 与 5.3 的失败分类同一条逻辑。</p>
-
-  <h4>六、全自动到 done</h4>
+  <h4>五、全自动到 done</h4>
   <p>不需要任何新机制：<strong>写一个没有 gate 的 workflow 就是全自动。</strong></p>
 <pre><code>id: tc_auto_v1
 stages:
@@ -565,18 +568,6 @@ on_failure:
   <p>人只做两件事：建单，以及在 <code>requirement</code> / <code>unknown</code> 转成 <code>blocked</code> 时看一眼 inbox。</p>
   <p><strong>gate 是可选的人审环节，不是流程的必经段。</strong>需要人把关就写 <code>kind: gate</code>，不需要就不写 —— 同一套代码支持两种形态，因为 gate 和 agent 只是 stage 的两种 <code>kind</code>。</p>
   <p><code>unknown</code> 在全自动工作流里必须保留 <code>block: true</code>。全自动最危险的不是失败，是「agent 认为自己成功了但实际做错了」；判不清就停下，比自动往下走安全。</p>
-
-  <h4>七、router 是 driver 内部的一个函数</h4>
-<pre><code>def dispatch(issue, stage):
-    st = get_stage(issue, stage)
-    actor, trace = route(issue, st)             # 纯函数，不写库
-    if actor is None:
-        emit(issue, 'route_pending',
-             {'stage': stage, 'requires': st.requires, 'trace': trace})
-        return
-    run = create_run(issue, stage, actor, trace)   # 与 emit 同一事务
-    notify_runtime(actor.runtime_id, run)</code></pre>
-  <p><code>route()</code> 只读状态、只返回结果，因此<strong>任何一次派发都能离线重放</strong>。它不是独立服务，也不调用模型 —— 路由一旦需要模型判断，就再也无法解释清楚为什么派给了谁。</p>
 
   <h3>5.3 失败路由表</h3>
   <p>第 5 步失败<strong>不等于</strong>回第 3 步。这是回退设计里最容易做错的地方。</p>
@@ -623,11 +614,9 @@ on_failure:
 
 <section>
   <h2>6 · 核心流程与一致性</h2>
-  <h3>6.1 两个循环</h3>
-  <ul>
-    <li><strong>gate 循环</strong>：后端开启 gate → issue 标黄进 inbox → 人 approve / reject → <code>stage_driver</code> 推进或回退。不产生 run，不会超时。</li>
-    <li><strong>run 循环</strong>：后端派发 → SSE 下行 → daemon CAS 认领 → 沙箱执行 → 批量上报事件 + 心跳 → <code>complete</code> → <code>stage_driver</code> 推进或按路由回退。</li>
-  </ul>
+  <h3>6.1 只有一个循环</h3>
+  <p><strong>run 循环</strong>：后端派发 → SSE 下行 → daemon CAS 认领 → 沙箱执行 → 批量上报事件 + 心跳 → <code>complete</code> → <code>stage_driver</code> 推进或按路由回退。</p>
+  <p>gate 不构成循环 —— 它是一次人点击，不超时、不回收、不心跳（见第 3 章）。
 
   <h3>6.2 派发只需一行 CAS</h3>
 <pre><code>UPDATE run
@@ -747,9 +736,8 @@ def on_issue_created(issue):
   <table>
     <thead><tr><th style="width:66px">方法</th><th style="width:38%">路径</th><th>说明</th></tr></thead>
     <tbody>
-      <tr><td><code>GET</code></td><td><code>/api/issues?status=&amp;stage=&amp;workflow=</code></td><td>看板列（列 = workflow 的 stage）</td></tr>
+      <tr><td><code>GET</code></td><td><code>/api/issues?status=&amp;stage=&amp;workflow=</code></td><td>看板列（列 = workflow 的 stage）；<code>workflow=none</code> 取「直接任务」</td></tr>
       <tr><td><code>POST</code></td><td><code>/api/issues</code></td><td>建 issue。<code>workflow_id</code> 可选，省略 = 无编排</td></tr>
-      <tr><td><code>GET</code></td><td><code>/api/issues?unplanned=1</code></td><td>「直接任务」列表：<code>workflow_id IS NULL</code></td></tr>
       <tr><td><code>PATCH</code></td><td><code>/api/issues/:id</code></td><td>改标题/指派，走 <code>If-Match: version</code></td></tr>
       <tr><td><code>POST</code></td><td><code>/api/issues/:id/comment</code></td><td>写 <code>event(type='comment')</code></td></tr>
       <tr><td><code>GET</code></td><td><code>/api/issues/:id/events?after=</code></td><td>历史回放 + 增量拉取</td></tr>
@@ -758,14 +746,13 @@ def on_issue_created(issue):
       <tr><td><code>GET</code></td><td><code>/api/issues/:id/stream</code></td><td>SSE，实时事件与进度</td></tr>
       <tr><td><code>GET</code></td><td><code>/api/inbox</code></td><td>所有 <code>awaiting_gate</code> 非空的 issue</td></tr>
       <tr><td><code>GET</code></td><td><code>/api/workflows/:id</code></td><td>阶段图定义：看板列顺序、gate 名称。默认取最新版本</td></tr>
-      <tr><td><code>POST</code></td><td><code>/api/issues/:id/workflow</code></td><td>显式迁移到指定版本，校验冲突则 409</td></tr>
-      <tr><td><code>GET</code></td><td><code>/api/actors</code></td><td>agent 清单：<code>capabilities</code>、<code>max_parallel</code>、是否在线、当前负载、是否冷却</td></tr>
+      <tr><td><code>GET</code></td><td><code>/api/actors</code></td><td>agent 清单：<code>capabilities</code>、<code>max_parallel</code>、是否在线、当前负载</td></tr>
       <tr><td><code>POST</code></td><td><code>/api/actors</code></td><td>注册 agent：<code>{name, runtime_id, capabilities, max_parallel}</code>，<code>kind</code> 固定 <code>agent</code></td></tr>
       <tr><td><code>PATCH</code></td><td><code>/api/actors/:id</code></td><td>改能力标签或并发数。只影响之后的派发，不改已发出的 run</td></tr>
-      <tr><td><code>GET</code></td><td><code>/api/runs/:id/route</code></td><td>该次派发的完整决策 trace（<code>run.route</code> 原样返回）</td></tr>
     </tbody>
   </table>
   <p><code>gate</code> 是唯一的人侧状态变更入口。<code>reject</code> 必须带 <code>back_to</code>，否则后端无法判断回退目标。</p>
+  <p>派发决策 trace 就是 <code>run.route</code> 这一列，随 issue 详情一起返回 —— 不为它单开一个端点。</p>
   <p>前端渲染看板时先拉 <code>/api/workflows/:id</code> 拿列顺序，再拉 <code>/api/issues</code> 拿卡片 —— <strong>列不是写死的</strong>，加一个 stage 只改 YAML，前端不用动。</p>
   <p>一个实例可以注册多份 YAML，但<strong>看板一次只渲染一个 workflow</strong>（顶部切换，默认取最近在用那份），列表接口用 <code>?workflow=</code> 过滤。阶段改名后，钉在旧版本上的单子按自己的 stage 名匹配列，匹配不到的落到末尾「历史阶段」列并标出版本号 —— 不要为了列对齐去自动迁移 issue。</p>
   <p>乐观锁靠 <code>version</code> 字段：</p>
@@ -795,10 +782,7 @@ def on_issue_created(issue):
   <p>订阅者就是一个 <code>dict[int, set[asyncio.Queue]]</code>。没有网络跳转、没有额外序列化、没有额外的服务依赖 —— 这是单进程架构换来的直接好处。</p>
   <p>游标用 <code>event.id</code>，客户端断线重连带 <code>Last-Event-ID</code> 即可补齐：</p>
 <pre><code>SELECT * FROM event WHERE issue_id = ? AND id &gt; ? ORDER BY id;   -- 走 idx_event_issue</code></pre>
-
-  <h3>7.4 事件分批上报</h3>
-  <p>daemon 本地缓冲，200ms 或 50 条刷一次，单次上限 200 条。不要一条一请求 —— 每次上报都是一个 <code>BEGIN IMMEDIATE</code>，一条一请求会把写锁排队放大两个数量级。</p>
-  <p>一次批量上报 = 一个事务：<code>executemany</code> 插 N 条 event，一次 <code>COMMIT</code>，一次广播。</p>
+  <p>daemon 上报事件同理要攒批：本地缓冲，200ms 或 50 条刷一次，单次上限 200 条。不要一条一请求 —— 每次上报都是一个 <code>BEGIN IMMEDIATE</code>，一条一请求会把写锁排队放大两个数量级。一次批量上报 = 一个事务：<code>executemany</code> 插 N 条 event，一次 <code>COMMIT</code>，一次广播。</p>
 </section>
 
 <section>
@@ -816,34 +800,26 @@ def on_issue_created(issue):
 
 <section>
   <h2>9 · 预算闸门</h2>
-  <p><code>job</code> 阶段没有 token 消耗，只按 token 算会漏掉「跑了一整天」；而回退会重开 run，只按单次 run 设限则回退越多额度越宽。所以预算必须分层。</p>
-  <h3>9.1 两层预算</h3>
+  <p><code>job</code> 阶段没有 token 消耗，只按 token 算会漏掉「跑了一整天」；而回退会重开 run，按单次 run 设限则回退越多额度越宽。所以预算<strong>只在 issue 上累加</strong>，不看单次 run。</p>
+  <h3>9.1 issue 累计预算</h3>
 <pre><code>// issue.budget —— 建单时由服务端从 config.toml 的 [budget.default] 展开写入
 {
   "max_tokens_total": 2000000,     // 整个 issue 累计，不随 run 重置
   "max_wall_clock_s": 86400,       // 整个 issue 累计
-  "max_tokens_per_run": 200000,
   "max_runs": 20
 }</code></pre>
-  <table>
-    <thead><tr><th style="width:26%">层级</th><th style="width:40%">作用</th><th>超限后果</th></tr></thead>
-    <tbody>
-      <tr><td>per-run</td><td>防止单次跑飞</td><td>run failed, <code>error_class=budget</code></td></tr>
-      <tr><td>per-issue 累计</td><td>防止回退刷额度</td><td>issue → blocked</td></tr>
-    </tbody>
-  </table>
+  <p>三个数字答的是同一个问题：这张单子总共还能烧多少。任一超限 → issue <code>blocked</code>、写 event、进 inbox。</p>
+  <p><code>agent</code> run 计 <code>tokens_in + tokens_out</code> 与墙钟；<code>job</code> run 只计墙钟、token 恒为 0 —— 这样「跑了一整天」的 job 也能被 <code>max_wall_clock_s</code> 抓住。</p>
   <p><code>issue.budget</code> 的列默认值是 <code>{}</code>，但<strong>空对象不等于「无限制」</strong> —— 建单时把 <code>config.toml</code> 的默认预算展开写进去，<code>{}</code> 只在读旧数据时兜底成默认值。</p>
   <p>阶段失败上限（<code>max_stage_attempts</code>）是<strong>工作流属性</strong>，写在 YAML 里，不进 budget。同一个阈值出现在两处，改的人一定会只改一处。</p>
   <p>累计值不单独存字段，直接对 <code>run</code> 表求和 —— 走 <code>idx_run_issue</code> 索引，几十行的表，比维护一个容易不同步的累加字段可靠。</p>
-<pre><code>SELECT COALESCE(SUM(tokens_in + tokens_out), 0) AS used,
+<pre><code>SELECT COUNT(*) AS runs,
+       COALESCE(SUM(tokens_in + tokens_out), 0) AS used,
        COALESCE(SUM(wall_clock_s), 0)           AS spent
   FROM run WHERE issue_id = ?;</code></pre>
-  <h3>9.2 按 kind 计费</h3>
-  <p><code>agent</code> run 计 token + 墙钟；<code>job</code> run 只计墙钟，token 恒为 0。<code>job</code> 阶段「跑了一整天」必须能被 <code>max_wall_clock_s</code> 抓住。</p>
-  <h3>9.3 三道防死循环闸</h3>
+  <h3>9.2 两道防死循环闸</h3>
   <ul>
     <li><strong>阶段级计数</strong>：<code>stage_attempts[stage] ≥ max_stage_attempts</code> → blocked，进 inbox。阈值有编排时取 YAML，无编排时取 <code>config.toml</code> 的 <code>[limits] max_stage_attempts</code> —— 后者只是兜底，不是第二份定义</li>
-    <li><strong>产物去重</strong>：新 artifact 的 <code>content_hash</code> 与上一版相同 → 直接判 failed，不进运行</li>
     <li><strong>run 数上限</strong>：<code>COUNT(*) FROM run WHERE issue_id = ?</code> 超过 <code>max_runs</code> → blocked。<code>env</code> 类重试不计次，这一道防的正是「环境一直不好、无限重跑」</li>
   </ul>
 </section>
@@ -869,16 +845,9 @@ def on_issue_created(issue):
   <p>依赖清单基本就是 FastAPI + Uvicorn + PyYAML + Jinja2。数据库驱动不用装 —— <code>sqlite3</code> 在标准库里。</p>
   <p>配置只有一个 <code>config.toml</code>：各 runtime 的 token、建单默认预算、无编排用的阶段失败上限。用标准库 <code>tomllib</code> 启动时读一次，不引配置库 —— 需要热更新的配置项，这个系统一个都没有。</p>
   <div class="card">
-    <h4>为什么不用 ORM</h4>
-    <p>六张表、十几条查询，SQLAlchemy 的模型声明会比 SQL 本身更长。而且 <code>BEGIN IMMEDIATE</code>、<code>PRAGMA</code> 这类 SQLite 特有操作最终还是要落回原生 SQL。不如一开始就写 SQL，一个 <code>store.py</code> 装得下全部。</p>
-  </div>
-  <div class="card">
-    <h4>为什么不用 aiosqlite</h4>
-    <p><code>sqlite3</code> 的调用是微秒级的本地 C 调用，包一层异步驱动只增加了一层线程和一层 <code>await</code>，并没有真的并行。正确做法是把路由声明为 <code>def</code>（不是 <code>async def</code>），FastAPI 会自动丢到线程池，事件循环不会被阻塞。</p>
-  </div>
-  <div class="card">
-    <h4>为什么不用 Alembic</h4>
-    <p>SQLite 的 <code>ALTER TABLE</code> 支持有限（不能删列、不能改列类型），框架生成的回滚脚本大概率是「建新表、拷数据、改名」。与其维护一堆看不懂的迁移，不如手写三段 SQL 配 <code>PRAGMA user_version</code>。</p>
+    <h4>为什么不用 ORM / 异步驱动 / 迁移框架</h4>
+    <p>六张表、十几条查询，SQLAlchemy 的模型声明会比 SQL 本身更长，而 <code>BEGIN IMMEDIATE</code>、<code>PRAGMA</code> 最终还是要落回原生 SQL —— 一个 <code>store.py</code> 装得下全部。<code>aiosqlite</code> 同理：<code>sqlite3</code> 是微秒级的本地 C 调用，包一层异步只多一层线程和一层 <code>await</code>；把路由声明成 <code>def</code>（不是 <code>async def</code>），FastAPI 会自己丢线程池。</p>
+    <p>迁移同理：SQLite 的 <code>ALTER TABLE</code> 不能删列、不能改列类型，框架生成的回滚脚本大概率是「建新表、拷数据、改名」。不如手写三段 SQL 配 <code>PRAGMA user_version</code>。</p>
   </div>
   <div class="card">
     <h4>备份：不要 cp app.db</h4>
@@ -899,7 +868,7 @@ def on_issue_created(issue):
       <tr><td>1</td><td>存储层</td><td><code>schema.sql</code>、连接工厂、<code>PRAGMA</code>、<code>write_tx()</code>、<code>user_version</code> 迁移</td></tr>
       <tr><td>2</td><td>workflow 快照</td><td>YAML 解析 + 启动期结构校验（闭环、可达性）+ 哈希入库，旧版本永不覆盖</td></tr>
       <tr><td>3</td><td><code>stage_driver</code></td><td><strong>核心</strong>：推进 / 回退 / 失效传播 / 计数闸门</td></tr>
-      <tr><td>4</td><td>router</td><td>候选过滤 / 确定性排序 / 熔断 / trace 落库</td></tr>
+      <tr><td>4</td><td>router</td><td>候选过滤 / 确定性排序 / trace 落库</td></tr>
       <tr><td>5</td><td>issue API</td><td>CRUD、gate 动作、inbox 查询</td></tr>
       <tr><td>6</td><td>run API</td><td>claim / heartbeat / events / complete / block</td></tr>
       <tr><td>7</td><td>事件流</td><td>SSE handler、进程内广播、游标补齐、daemon 上线补派</td></tr>
@@ -925,7 +894,6 @@ def on_issue_created(issue):
       <tr><td>gate rejected</td><td>带 <code>back_to</code></td><td><code>current_stage = back_to</code>，标下游 stale，清 <code>awaiting_gate</code></td></tr>
       <tr><td>gate rejected</td><td>未带 <code>back_to</code></td><td>拒绝请求，400</td></tr>
       <tr><td>任意推进</td><td>存在活跃 run</td><td>拒绝派发，等待现有 run 结束</td></tr>
-      <tr><td>任意派发</td><td>stage 写了 <code>assignee</code></td><td>跳过路由，直接用该 actor</td></tr>
       <tr><td>任意派发</td><td>路由有候选</td><td>按排序选一个，trace 存进 <code>run.route</code>，建 run</td></tr>
       <tr><td>任意派发</td><td>路由无候选</td><td><strong>不建 run</strong>，写 <code>route_pending</code>，issue 保持 <code>active</code></td></tr>
       <tr><td>daemon 上线</td><td>存在「有 stage 无 run」的 issue</td><td>逐个补派；仍无候选则继续等</td></tr>
@@ -955,12 +923,12 @@ workflows/testcase_v1.yaml</code></pre>
 <section>
   <h2>12 · 范围边界</h2>
   <h3>做什么</h3>
-  <p>issue 与工作流管理（<strong>workflow 可选</strong>：有编排走多阶段与回退，无编排就是单步或纯人工）、<strong>多 agent 路由</strong>（stage 声明能力，派发时按能力 / 在线 / 负载 / 熔断选 agent，决策落库）、三类阶段（gate / agent / job）、失败分类与回退、产物版本与失效传播、实时进度、预算闸门、完整审计流。</p>
+  <p>issue 与工作流管理（<strong>workflow 可选</strong>：有编排走多阶段与回退，无编排就是单步或纯人工）、<strong>多 agent 路由</strong>（stage 声明能力，派发时按能力 / 在线 / 负载选 agent，决策落库）、三类阶段（gate / agent / job）、失败分类与回退、产物版本与失效传播、实时进度、预算闸门、完整审计流。</p>
   <h3>不做什么，以及为什么</h3>
   <table>
     <thead><tr><th style="width:26%">不做</th><th>原因</th></tr></thead>
     <tbody>
-      <tr><td>多实例 / 读写分离</td><td>SQLite 单文件，多实例就要换 Postgres。而进程内广播、<code>BEGIN IMMEDIATE</code> 排队两个前提会一起失效，等于换一套架构</td></tr>
+      <tr><td>多实例 / 读写分离 / 微服务拆分</td><td>SQLite 单文件，多实例就要换 Postgres。而进程内广播、<code>BEGIN IMMEDIATE</code> 排队两个前提会一起失效，等于换一套架构</td></tr>
       <tr><td>技能库 / 向量检索 / 语义匹配</td><td>路由用精确的 <code>requires</code> 标签：能被解释、能离线重放。语义匹配每次都得出不同答案，也回答不了「为什么不选另一个」；重复任务靠 workflow 模板解决，不靠检索</td></tr>
       <tr><td>多项目 / 多租户</td><td>一个团队一个仓库。加项目维度会让每条查询都带 <code>project_id</code>，收益不成正比</td></tr>
       <tr><td>组织 / squad 层级</td><td>2–5 人不需要层级。<code>actor</code> 表里加个 <code>kind</code> 就能区分人和 agent</td></tr>
@@ -969,7 +937,6 @@ workflows/testcase_v1.yaml</code></pre>
       <tr><td>成本看板</td><td>数字记在 <code>run</code> 表里，需要时写条 SQL 查。先不做图</td></tr>
       <tr><td>IM 通知</td><td>inbox 页够看。真需要时加一个 webhook，是半天的事</td></tr>
       <tr><td>可视化工作流编辑器</td><td>YAML 手写 + 启动校验报错，比拖拽编辑器更快定位问题</td></tr>
-      <tr><td>微服务拆分</td><td>单进程能扛住 2–5 人的负载，拆分只会让调试变难</td></tr>
     </tbody>
   </table>
   <p>这些边界不是「以后再做」，而是<strong>当前规模下不该做</strong>。约束比选项更能保证项目跑得动。</p>

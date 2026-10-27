@@ -60,7 +60,7 @@
       "不得修改 test vector 与步骤序列"
     ]
   },
-  "budget": { "max_tokens": 200000, "max_wall_clock_s": 3600 },
+  "budget": { "remaining_tokens": 1450000, "remaining_wall_clock_s": 72000 },
   "workspace": "/work/issue-10"
 }
 ```
@@ -71,7 +71,7 @@
 | `inputs.base` | 首次为空 | 空 = 从零做；非空 = 在它之上改，不是重写 |
 | `inputs.feedback` | 回退重做时 | 先读它再动手，见第六节 |
 | `inputs.constraints` | 可能为空 | 硬边界，逐条遵守 |
-| `budget` | 总是 | 本次 run 的额度，从 `issue.budget` 展开而来；见第七节 |
+| `budget` | 总是 | 这张单子**剩余**的额度（不是本次 run 的配额）；见第七节 |
 | `workspace` | 总是 | 工作目录，仓库已 checkout 到本 issue 的分支 |
 
 只在 `workspace` 与 `stage.requires` 允许的目标机上读写。别的路径一概不碰。
@@ -203,7 +203,7 @@
 | 产物无法满足 `stage.artifacts` 全集 | 不能报 `succeeded` |
 | 收到 run 取消信号 | 停手，保留已产出的产物，不再写 |
 
-预算不是建议。撞上 `max_tokens_per_run` 的 run 会被强制判 `failed`，
+预算不是建议。额度是**整张单子累计**的，撞上它的 run 会被强制判 `failed`，单据随即 `blocked`，
 你留下的半成品和一句「快好了」都没有用；主动收尾至少能交出可用的部分。
 
 ---
