@@ -1,0 +1,980 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Issue &amp; Agent 系统设计</title>
+<style>
+  :root {
+    --bg: #FAFAF8;
+    --panel: #FFFFFF;
+    --line: #E4E2DC;
+    --ink: #1F1F1D;
+    --ink2: #5F5E5A;
+    --ink3: #888780;
+    --blue: #185FA5;
+    --blue-bg: #E6F1FB;
+    --teal: #0F6E56;
+    --teal-bg: #E1F5EE;
+    --code-bg: #F4F3EF;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 56px 24px 96px;
+    background: var(--bg); color: var(--ink);
+    font-family: "PingFang SC", "Hiragino Sans GB", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 15px; line-height: 1.75;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 900px; margin: 0 auto; }
+  header { margin-bottom: 40px; }
+  .kicker { font-size: 12px; letter-spacing: .12em; text-transform: uppercase; color: var(--blue); font-weight: 500; margin-bottom: 12px; }
+  h1 { font-size: 32px; font-weight: 500; letter-spacing: -.01em; margin: 0 0 12px; line-height: 1.3; }
+  .sub { font-size: 15px; color: var(--ink2); margin: 0 0 20px; }
+  .meta { padding-top: 16px; border-top: 1px solid var(--line); font-size: 13px; color: var(--ink3); display: flex; gap: 24px; flex-wrap: wrap; }
+  h2 { font-size: 20px; font-weight: 500; margin: 56px 0 16px; padding-bottom: 10px; border-bottom: 1px solid var(--line); }
+  h3 { font-size: 16px; font-weight: 500; margin: 32px 0 10px; }
+  h4 { font-size: 14px; font-weight: 500; margin: 24px 0 8px; color: var(--ink); }
+  p { margin: 0 0 14px; }
+  strong { font-weight: 500; }
+  code { font-family: var(--mono); font-size: .875em; background: var(--code-bg); padding: 2px 5px; border-radius: 4px; color: #A32D2D; }
+  pre { background: var(--code-bg); border: 1px solid var(--line); border-radius: 10px; padding: 18px 20px; overflow-x: auto; font-family: var(--mono); font-size: 12.5px; line-height: 1.7; color: #2C2C2A; margin: 0 0 20px; }
+  pre code { background: none; padding: 0; color: inherit; font-size: inherit; }
+  .lead { background: var(--blue-bg); border-left: 3px solid var(--blue); padding: 16px 20px; border-radius: 0 8px 8px 0; margin: 0 0 24px; }
+  .lead p:last-child { margin: 0; }
+  blockquote { margin: 0 0 20px; padding: 14px 20px; background: var(--panel); border-left: 3px solid var(--ink3); border-radius: 0 8px 8px 0; color: var(--ink2); }
+  blockquote p:last-child { margin: 0; }
+  .fig { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 20px 16px 12px; margin: 24px 0; }
+  .fig svg { display: block; width: 100%; height: auto; }
+  .cap { font-size: 12px; color: var(--ink3); text-align: center; margin-top: 12px; padding-top: 10px; border-top: 1px dashed var(--line); }
+  table { width: 100%; border-collapse: collapse; margin: 0 0 20px; font-size: 13.5px; }
+  th, td { text-align: left; padding: 9px 11px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { font-weight: 500; color: var(--ink2); font-size: 12.5px; background: #F7F6F2; }
+  td code { font-size: .82em; }
+  ul { margin: 0 0 16px; padding-left: 22px; }
+  li { margin-bottom: 6px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; margin: 0 0 20px; }
+  .card h4 { margin: 0 0 8px; font-size: 14px; font-weight: 500; }
+  .card p { margin: 0; font-size: 13px; color: var(--ink2); line-height: 1.7; }
+  @media (max-width: 700px) {
+    body { padding: 32px 16px 64px; }
+    h1 { font-size: 26px; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <div class="kicker">System Design</div>
+  <h1>Issue &amp; Agent 系统设计</h1>
+  <p class="sub">参考 Multica —— issue tracker，assignee 可以是 coding agent。<br>定位：2–5 人小团队自建自用。一台机器、一个进程、一个 SQLite 文件。</p>
+  <div class="meta">
+    <span>2026-10-27</span>
+    <span>6 张表 · 5 个状态 · 多 agent 路由</span>
+    <span>Python + SQLite · 单进程</span>
+  </div>
+</header>
+
+<section>
+  <h2>0 · 一句话定位</h2>
+  <div class="lead">
+    <p><strong>把 agent 做成 assignee。</strong>不为人与 agent 设计两套模型 —— 两者都是 <code>actor</code>，issue 分给谁都一样，区别只是 actor 背后是「人打开看板」还是「daemon 拉起 CLI」。</p>
+  </div>
+  <p>规模前提决定了每一个取舍：不做多租户、不做权限矩阵、不做插件体系。小团队要的是<strong>今天就能跑起来、出问题能一眼看懂</strong>，不是能承载一千人的平台。</p>
+  <p>技术底色同理：<strong>Python 标准库 + SQLite，一个进程跑完全部</strong>。没有额外服务要装、要连、要运维。</p>
+</section>
+
+<section>
+  <h2>1 · 第一约束</h2>
+  <div class="lead"><p>agent 跑在用户自己的机器上，<strong>控制面无法入站连接</strong>。</p></div>
+  <p>所有连接由执行面发起，控制面只做应答。由此得到的简化：</p>
+  <table>
+    <thead><tr><th style="width:34%">常规做法</th><th style="width:30%">本设计</th><th>理由</th></tr></thead>
+    <tbody>
+      <tr><td>WebSocket 双向通道</td><td>下行 SSE + 上行 HTTP POST</td><td>不需要双向，单向推送足够</td></tr>
+      <tr><td>云端跑 agent 容器</td><td>本地 daemon 执行</td><td>代码与算力不出内网</td></tr>
+      <tr><td>控制面持有 git 凭证</td><td>daemon 持有本地凭证</td><td>凭证永不上传</td></tr>
+      <tr><td>Redis / MQ 做 fan-out</td><td>进程内广播 + 事件落库</td><td>单进程，广播不需要跨网络</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section>
+  <h2>2 · 架构</h2>
+  <div class="fig">
+    <svg viewBox="0 0 680 508" role="img" xmlns="http://www.w3.org/2000/svg" style="font-family:inherit">
+      <title>三层架构</title>
+      <desc>控制面负责 issue 与调度，SQLite 文件存储事实，多台机器各跑一个 daemon，由后端路由把每个 stage 派给某个 agent。</desc>
+      <defs>
+        <marker id="a1" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+        </marker>
+      </defs>
+      <rect x="240" y="40" width="200" height="44" rx="8" fill="#ffffff" stroke="#5F5E5A" stroke-width="0.5"/>
+      <text x="340" y="62" text-anchor="middle" dominant-baseline="central" font-size="14" font-weight="500" fill="#444441">人 · 看板 / API</text>
+      <line x1="340" y1="84" x2="340" y2="116" stroke="#5F5E5A" stroke-width="1.5" marker-end="url(#a1)"/>
+      <rect x="40" y="120" width="600" height="116" rx="16" fill="#E6F1FB" stroke="#185FA5" stroke-width="0.5"/>
+      <text x="60" y="144" font-size="12" fill="#185FA5">控制面 · 单进程 FastAPI</text>
+      <rect x="64" y="160" width="160" height="56" rx="8" fill="#ffffff" stroke="#185FA5" stroke-width="0.5"/>
+      <text x="144" y="180" text-anchor="middle" dominant-baseline="central" font-size="14" font-weight="500" fill="#0C447C">issue API</text>
+      <text x="144" y="200" text-anchor="middle" dominant-baseline="central" font-size="12" fill="#185FA5">CRUD / 状态机</text>
+      <rect x="248" y="160" width="160" height="56" rx="8" fill="#ffffff" stroke="#185FA5" stroke-width="0.5"/>
+      <text x="328" y="180" text-anchor="middle" dominant-baseline="central" font-size="14" font-weight="500" fill="#0C447C">stage driver</text>
+      <text x="328" y="200" text-anchor="middle" dominant-baseline="central" font-size="12" fill="#185FA5">推进 / 回退 / 路由</text>
+      <rect x="432" y="160" width="184" height="56" rx="8" fill="#ffffff" stroke="#185FA5" stroke-width="0.5"/>
+      <text x="524" y="180" text-anchor="middle" dominant-baseline="central" font-size="14" font-weight="500" fill="#0C447C">事件流</text>
+      <text x="524" y="200" text-anchor="middle" dominant-baseline="central" font-size="12" fill="#185FA5">SSE · 进程内广播</text>
+      <line x1="200" y1="236" x2="200" y2="270" stroke="#5F5E5A" stroke-width="1.5" marker-end="url(#a1)" marker-start="url(#a1)"/>
+      <rect x="40" y="272" width="380" height="48" rx="8" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.5"/>
+      <text x="230" y="296" text-anchor="middle" dominant-baseline="central" font-size="12.5" fill="#444441">SQLite · data/app.db · WAL</text>
+      <line x1="520" y1="236" x2="520" y2="368" stroke="#0F6E56" stroke-width="1.5" marker-end="url(#a1)"/>
+      <text x="506" y="344" text-anchor="end" font-size="13" fill="#5F5E5A">job 下行 / event 上行</text>
+      <rect x="40" y="370" width="600" height="118" rx="16" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.5"/>
+      <text x="60" y="394" font-size="12" fill="#0F6E56">执行面 · 每台机器一个 daemon，各自跑若干 agent</text>
+      <rect x="64" y="410" width="176" height="56" rx="8" fill="#ffffff" stroke="#0F6E56" stroke-width="0.5"/>
+      <text x="152" y="430" text-anchor="middle" dominant-baseline="central" font-size="14" font-weight="500" fill="#085041">daemon ×N</text>
+      <text x="152" y="450" text-anchor="middle" dominant-baseline="central" font-size="12" fill="#0F6E56">出站连接 · 拉任务</text>
+      <line x1="240" y1="438" x2="268" y2="438" stroke="#0F6E56" stroke-width="1.5" marker-end="url(#a1)"/>
+      <rect x="272" y="410" width="160" height="56" rx="8" fill="#ffffff" stroke="#0F6E56" stroke-width="0.5"/>
+      <text x="352" y="430" text-anchor="middle" dominant-baseline="central" font-size="14" font-weight="500" fill="#085041">Agent CLI</text>
+      <text x="352" y="450" text-anchor="middle" dominant-baseline="central" font-size="12" fill="#0F6E56">agent 阶段才调用</text>
+      <line x1="432" y1="438" x2="460" y2="438" stroke="#0F6E56" stroke-width="1.5" marker-end="url(#a1)"/>
+      <rect x="464" y="410" width="152" height="56" rx="8" fill="#ffffff" stroke="#0F6E56" stroke-width="0.5"/>
+      <text x="540" y="430" text-anchor="middle" dominant-baseline="central" font-size="14" font-weight="500" fill="#085041">Sandbox + Git</text>
+      <text x="540" y="450" text-anchor="middle" dominant-baseline="central" font-size="12" fill="#0F6E56">分支 / PR / 日志</text>
+    </svg>
+    <div class="cap">图 1 · 控制面只做三件事：存事实、推进阶段、路由派发</div>
+  </div>
+  <ul>
+    <li><strong>控制面</strong>：维护状态、推进阶段、路由与派发 run。不跑模型、不碰代码、不存凭证。</li>
+    <li><strong>事实源</strong>：一个 SQLite 文件。事实从 <code>event</code> 派生，产物从 <code>artifact</code> 派生。</li>
+    <li><strong>执行面</strong>：daemon 是唯一可信执行代理，Agent CLI 是插件，Sandbox 是隔离边界。</li>
+  </ul>
+  <p>一台机器一个 daemon，一个 daemon 可以承载多个 agent（不同模型、不同工具链）。哪一步交给谁，由控制面在派发时决定（见 5.2），daemon 只负责执行拿到的 run。</p>
+  <p>单进程即可承载 2–5 人团队的负载。不做微服务拆分，也不做多实例 —— 拆分带来的部署与调试成本，在这个规模下远大于收益。</p>
+</section>
+
+<section>
+  <h2>3 · 领域模型：三个概念严格分离</h2>
+  <table>
+    <thead><tr><th style="width:14%">概念</th><th style="width:28%">是什么</th><th style="width:16%">谁产生</th><th>生命周期</th></tr></thead>
+    <tbody>
+      <tr><td><strong>issue</strong></td><td>一个工作流实例</td><td>人</td><td>长，跨天</td></tr>
+      <tr><td><strong>run</strong></td><td>机器执行的一次尝试</td><td>后端派发</td><td>短，几分钟到几小时</td></tr>
+      <tr><td><strong>gate</strong></td><td>等人的一个关卡</td><td>后端开启</td><td>不定，等多久算多久</td></tr>
+    </tbody>
+  </table>
+  <p>这三个概念必须分开。把「执行」「人审」「进度」压进 issue 和 run 两个对象里，状态机就会互相打架：
+issue 认为自己在 review，run 认为自己在跑，两者迟早不同步。</p>
+  <div class="lead">
+    <p><strong>关键决定：<code>gate</code> 不建 run。</strong></p>
+    <p><code>run</code> 的生命周期绑定心跳与超时回收（60s 无心跳即判 failed），而人审没有确定时长 —— 审一天是常态。所以 run 只表示「机器在跑」，人审用 <code>issue.awaiting_gate</code> 表达：不建 run、不心跳、不回收。</p>
+  </div>
+
+  <h3>3.1 issue 的五个状态</h3>
+
+  <div class="fig">
+    <svg viewBox="0 0 680 384" role="img" xmlns="http://www.w3.org/2000/svg" style="font-family:inherit">
+      <title>issue 与 run 的状态机</title>
+      <desc>issue 从 open 经 active 到 done，active 与 blocked 互转；run 从 queued 经 claimed、running 到 succeeded 或 failed。</desc>
+      <defs>
+        <marker id="a2" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+        </marker>
+      </defs>
+      <text x="40" y="48" font-size="12" fill="#185FA5">issue · 粗粒度状态，只回答「有没有卡住」</text>
+      <rect x="40" y="64" width="140" height="44" rx="8" fill="#E6F1FB" stroke="#185FA5" stroke-width="0.5"/>
+      <text x="110" y="86" text-anchor="middle" dominant-baseline="central" font-size="13" fill="#0C447C">open</text>
+      <line x1="180" y1="86" x2="202" y2="86" stroke="#185FA5" stroke-width="1.5" marker-end="url(#a2)"/>
+      <rect x="204" y="64" width="140" height="44" rx="8" fill="#E6F1FB" stroke="#185FA5" stroke-width="0.5"/>
+      <text x="274" y="86" text-anchor="middle" dominant-baseline="central" font-size="13" font-weight="500" fill="#0C447C">active</text>
+      <line x1="344" y1="86" x2="366" y2="86" stroke="#185FA5" stroke-width="1.5" marker-end="url(#a2)"/>
+      <rect x="368" y="64" width="140" height="44" rx="8" fill="#E6F1FB" stroke="#185FA5" stroke-width="0.5"/>
+      <text x="438" y="86" text-anchor="middle" dominant-baseline="central" font-size="13" fill="#0C447C">done</text>
+      <line x1="274" y1="108" x2="274" y2="138" stroke="#185FA5" stroke-width="1.5" marker-end="url(#a2)" marker-start="url(#a2)"/>
+      <rect x="204" y="140" width="140" height="44" rx="8" fill="#FCEBEB" stroke="#A32D2D" stroke-width="0.5"/>
+      <text x="274" y="162" text-anchor="middle" dominant-baseline="central" font-size="13" fill="#A32D2D">blocked</text>
+      <text x="358" y="156" font-size="12" fill="#5F5E5A">连续失败超限 / 主动报阻塞</text>
+      <text x="358" y="176" font-size="12" fill="#5F5E5A">人补充后恢复，stage 原地不变</text>
+      <text x="40" y="228" font-size="12" fill="#0F6E56">run · 机器执行的一次尝试（人审不产生 run）</text>
+      <rect x="40" y="244" width="140" height="44" rx="8" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.5"/>
+      <text x="110" y="266" text-anchor="middle" dominant-baseline="central" font-size="13" fill="#085041">queued</text>
+      <line x1="180" y1="266" x2="202" y2="266" stroke="#0F6E56" stroke-width="1.5" marker-end="url(#a2)"/>
+      <rect x="204" y="244" width="140" height="44" rx="8" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.5"/>
+      <text x="274" y="266" text-anchor="middle" dominant-baseline="central" font-size="13" fill="#085041">claimed</text>
+      <line x1="344" y1="266" x2="366" y2="266" stroke="#0F6E56" stroke-width="1.5" marker-end="url(#a2)"/>
+      <rect x="368" y="244" width="140" height="44" rx="8" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.5"/>
+      <text x="438" y="266" text-anchor="middle" dominant-baseline="central" font-size="13" fill="#085041">running</text>
+      <line x1="508" y1="266" x2="530" y2="266" stroke="#0F6E56" stroke-width="1.5" marker-end="url(#a2)"/>
+      <rect x="532" y="244" width="108" height="44" rx="8" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.5"/>
+      <text x="586" y="266" text-anchor="middle" dominant-baseline="central" font-size="13" fill="#085041">succeeded</text>
+      <line x1="438" y1="288" x2="438" y2="318" stroke="#0F6E56" stroke-width="1.5" marker-end="url(#a2)"/>
+      <rect x="368" y="320" width="140" height="44" rx="8" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.5" stroke-dasharray="4 3"/>
+      <text x="438" y="342" text-anchor="middle" dominant-baseline="central" font-size="13" fill="#085041">failed</text>
+      <text x="522" y="336" font-size="12" fill="#5F5E5A">报错 / 超预算</text>
+      <text x="522" y="354" font-size="12" fill="#5F5E5A">心跳超时</text>
+    </svg>
+    <div class="cap">图 2 · status 只管「有没有卡住」，进度由 current_stage 表达</div>
+  </div>
+
+  <table>
+    <thead><tr><th style="width:18%">status</th><th style="width:40%">含义</th><th>与 stage 的关系</th></tr></thead>
+    <tbody>
+      <tr><td><code>open</code></td><td>已创建，未开始</td><td>有编排 = 首阶段；无编排 = <code>NULL</code></td></tr>
+      <tr><td><code>active</code></td><td>工作流推进中（含等人审）</td><td>任意 stage（无编排为 <code>NULL</code>）</td></tr>
+      <tr><td><code>blocked</code></td><td>需要人介入</td><td><strong>stage 保持不变</strong>，恢复后原地继续</td></tr>
+      <tr><td><code>done</code></td><td>全部阶段通过</td><td>有编排 = 末阶段；无编排 = <code>NULL</code></td></tr>
+      <tr><td><code>canceled</code></td><td>终止</td><td>—</td></tr>
+    </tbody>
+  </table>
+  <p><strong>只有五个状态。</strong>进度由 <code>current_stage</code> 精确表达，<code>status</code> 只回答一个问题 —— 有没有卡住。两套机制同时描述进度，必然出现「status=in_review 但 stage=gen_script」这类不可能状态。</p>
+  <p><code>awaiting_gate</code> 非空时 issue 仍是 <code>active</code>（它在正常等着），只是看板上标黄显示「等人」。</p>
+  <p>issue 分<strong>有编排</strong>和<strong>无编排</strong>两种形态（见 4.8），但这五个状态对两者完全一致 —— <code>status</code> 只回答「有没有卡住」，跟有没有 workflow 无关。没有 workflow 的 issue 一样会 active、会 blocked、会 done。</p>
+
+  <h3>3.2 run 的两种 kind</h3>
+  <ul>
+    <li><code>agent</code>：LLM 执行，计 token，产物通常是脚本 / 代码，常伴 PR</li>
+    <li><code>job</code>：<strong>不调用 LLM</strong>，直接执行命令，只计墙钟时间，产物是日志与判定</li>
+  </ul>
+  <p>「运行测试」属于 <code>job</code>。让 agent 去跑测试既贵又不确定，让它以确定的方式执行更好。</p>
+
+  <h3>3.3 三者的推进关系</h3>
+<pre><code>run.succeeded  → 推进 current_stage（后端唯一执行）
+run.failed     → 按失败分类：原地重试 / 回退到某 stage / blocked
+gate.approved  → 推进 current_stage
+gate.rejected  → 回退到指定 stage，并标记下游失效</code></pre>
+  <p><strong>所有 stage 变更只在一个地方发生</strong>：<code>stage driver</code>（后端的一个函数）。daemon 和前端都不能直接写 <code>current_stage</code>。</p>
+</section>
+
+<section>
+  <h2>4 · 数据模型</h2>
+<pre><code>PRAGMA journal_mode = WAL;   synchronous = NORMAL;
+PRAGMA foreign_keys = ON;    busy_timeout = 5000;
+
+actor    (id INTEGER PK, kind: human|agent, name, runtime_id?,
+          capabilities JSON, max_parallel, created_at)
+workflow (id TEXT, version INT, spec JSON, spec_hash, created_at)
+          PRIMARY KEY (id, version)   -- 不可变快照，只增不改
+issue    (id INTEGER PK, title, body,
+          workflow_id?, workflow_version?, current_stage?,   -- NULL = 无编排
+          status, assignee_id, awaiting_gate, gate_opened_at,
+          stage_attempts JSON, budget JSON, version, created_by,
+          created_at, updated_at)
+          CHECK 三列同为空、或同为非空    -- 不允许「半编排」
+          FK (workflow_id, workflow_version) → workflow(id, version)
+run      (id INTEGER PK, issue_id, stage, kind: agent|job, actor_id, attempt,
+          status, claim_token, claimed_at, heartbeat_at, inputs JSON,
+          route JSON,                      -- 路由决策留痕，见 5.2
+          tokens_in, tokens_out, wall_clock_s, error_class, error,
+          started_at, ended_at)            UNIQUE (issue_id, stage, attempt)
+artifact (id INTEGER PK, issue_id, stage, version, kind, content_ref,
+          content_hash, produced_by, stale 0|1)
+                                           UNIQUE (issue_id, stage, version)
+event    (id INTEGER PK AUTOINCREMENT, issue_id, run_id?, actor_id, type,
+          payload JSON, ts)
+
+-- 时间一律 INTEGER Unix 毫秒 UTC
+-- 结构化字段一律 TEXT 存 JSON，查询用 json_extract()
+-- 布尔一律 INTEGER 0/1 + CHECK，不用 'true'/'false'</code></pre>
+
+  <h3>4.1 event 与 artifact 的分界</h3>
+  <p>这两个表回答不同问题，不能合并。</p>
+  <table>
+    <thead><tr><th style="width:14%"></th><th style="width:43%">event</th><th>artifact</th></tr></thead>
+    <tbody>
+      <tr><td>回答</td><td><strong>发生了什么</strong></td><td><strong>产出了什么</strong></td></tr>
+      <tr><td>体量</td><td>小，payload &lt; 4KB</td><td>大，引用式存储</td></tr>
+      <tr><td>可变</td><td>永不修改</td><td>有版本，可标 stale</td></tr>
+      <tr><td>例子</td><td>「run 887 失败，error_class=script_bug」</td><td>「脚本 v2，sha256:9f3a」</td></tr>
+      <tr><td>日志正文</td><td>不放，只放 <code>artifact_id</code></td><td><code>kind='run_log'</code></td></tr>
+    </tbody>
+  </table>
+  <p><strong>event 承载一切事实，artifact 承载一切产物。</strong>event 里出现大段正文就是设计错误。</p>
+
+  <h3>4.2 没有 comments 表</h3>
+  <p>评论就是 <code>event(type='comment')</code>。评论、状态变更、阻塞报告、run 结果都在事件流里，审计与实时推送共用一条数据流。</p>
+
+  <h3>4.3 PR 是 artifact，不是 run 字段</h3>
+  <p><code>job</code> 阶段的产出是日志和判定，没有 PR。把 PR 当成 run 的主产出，模型就装不下「运行测试」这种阶段。统一为 <code>artifact(kind='pr')</code>。</p>
+
+  <h3>4.4 UNIQUE 约束</h3>
+  <p>必须是 <code>UNIQUE(issue_id, stage, attempt)</code>。用 <code>(issue_id, attempt)</code> 会让 <code>gen_script</code> 的第 1 次和 <code>gen_case</code> 的第 1 次撞车，插入直接失败。</p>
+
+  <h3>4.5 为什么只有 event 用 AUTOINCREMENT</h3>
+  <p><code>event.id</code> 是 SSE 的游标。客户端断线重连带 <code>Last-Event-ID: 1042</code>，服务端补 <code>id &gt; 1042</code>。</p>
+  <p>普通 <code>INTEGER PRIMARY KEY</code> 的 rowid 在删除后<strong>会被复用</strong> —— 删掉末尾几条事件后，新事件的 id 可能又是同一个值，客户端的游标就会漏数据。<code>AUTOINCREMENT</code> 保证 id 严格单调递增，代价只是一张 <code>sqlite_sequence</code> 表。其余表不需要这个保证。</p>
+
+  <h3>4.6 三条存储约定</h3>
+  <table>
+    <thead><tr><th style="width:18%">类型</th><th style="width:34%">存法</th><th>原因</th></tr></thead>
+    <tbody>
+      <tr><td>时间</td><td><code>INTEGER</code> Unix 毫秒，UTC</td><td>SQLite 没有时区类型。存字符串只是在字典序上碰巧正确，跨时区或排序就会出错</td></tr>
+      <tr><td>结构化字段</td><td><code>TEXT</code> 存 JSON</td><td>没有 JSONB，<code>TEXT</code> + <code>json_extract()</code> 够用（3.38+ 内置 JSON1）</td></tr>
+      <tr><td>布尔</td><td><code>INTEGER</code> 0/1 + <code>CHECK</code></td><td>没有 BOOLEAN 类型，别用 <code>'true'/'false'</code> 字符串</td></tr>
+    </tbody>
+  </table>
+  <p>时间用毫秒而不是秒，是因为 gate 等待时长、心跳超时需要亚秒精度。用 <code>int(time.time() * 1000)</code> 生成，<strong>不要把 <code>datetime</code> 转成字符串再入库</strong>。</p>
+
+  <h3>4.7 workflow 是快照，不是引用</h3>
+  <p><code>issue.workflow_id</code> 不是数据库主键，它是 YAML 里 <code>id:</code> 字段的值（如 <code>testcase_v1</code>）—— 一个<strong>逻辑名</strong>，用来回答「这张单子走哪张阶段图」。</p>
+  <p>但它不能只指向一个磁盘文件。真实失效场景：</p>
+  <ol>
+    <li>周一：<code>tc-05.2</code> 建单，走 <code>gen_script → review_script → run</code>，卡在 <code>run</code>。</li>
+    <li>周二：有人把 YAML 里 <code>review_script</code> 改名成 <code>review_code</code>，或把 <code>env</code> 的 <code>retry_same</code> 改成 <code>back_to</code>。改完重启，服务照常起来（新定义自校验通过）。</li>
+    <li>周三：<code>tc-05.2</code> 的 run 失败，<code>stage_driver</code> 按新路由回退到 <code>gen_script</code>…… 而这张单子的 <code>stage_attempts</code> 记的 key、已产出 artifact 的 stage 名，全是旧定义的名字。</li>
+  </ol>
+  <p>结果是一张<strong>在用旧名字、却按新规则推进</strong>的单子。这类状态错乱没有报错，只有数据不一致，排查成本极高。而触发条件只是「改了一次配置」。</p>
+  <p>所以 workflow 定义必须落库成<strong>不可变快照</strong>，启动时同步一次，不覆盖旧行：</p>
+  <table>
+    <thead><tr><th style="width:44%">情况</th><th>动作</th></tr></thead>
+    <tbody>
+      <tr><td>库里没有这个 id</td><td>插入 <code>version = 1</code></td></tr>
+      <tr><td>最新版本的 <code>spec_hash</code> 与新文件相同</td><td>什么都不做</td></tr>
+      <tr><td>哈希不同</td><td>插入 <code>version = max + 1</code></td></tr>
+    </tbody>
+  </table>
+  <p><code>stage_driver</code> 读定义时，<strong>用 issue 自己那条 <code>(workflow_id, workflow_version)</code></strong>，不是内存里的最新版。这样改 YAML 只影响新建的 issue，在途的按原定义走完。</p>
+  <p>把在途 issue 迁到新版本是一个<strong>显式动作</strong>：<code>POST /api/issues/:id/workflow</code>。后端校验 <code>current_stage</code> 在新定义里存在、且新定义能走完剩余阶段，才允许迁移，否则 409 并说明冲突在哪。隐式迁移等于允许「改配置文件远程修改所有在途单据的状态机」。</p>
+
+  <h3>4.8 issue 有两种形态：有编排 / 无编排</h3>
+  <p>不是每个 issue 都需要工作流。一个「把 README 的错别字改了」的任务没有六个阶段，也不需要回退到第 3 步。强制它先定义一份 YAML 是纯粹的摩擦。</p>
+  <table>
+    <thead><tr><th style="width:14%">形态</th><th style="width:18%"><code>workflow_id</code></th><th style="width:18%"><code>current_stage</code></th><th>典型场景</th></tr></thead>
+    <tbody>
+      <tr><td><strong>有编排</strong></td><td>非空</td><td>非空</td><td>澄清 → 生成 → 审 → 跑 → 再审，失败要回退</td></tr>
+      <tr><td><strong>无编排</strong></td><td><code>NULL</code></td><td><code>NULL</code></td><td>一次派发就结束的单步任务</td></tr>
+    </tbody>
+  </table>
+  <p><strong>纯人工任务不属于「无编排」。</strong>它用一份只含 gate 阶段的 workflow 表达（<code>clarify → __done__</code>）：无编排的 issue 只能由「run 结束」推进，而纯人工任务根本没有 run，写成无编排就永远停在 <code>open</code>。</p>
+  <p><strong>为什么不给「无编排」塞一个单阶段的 workflow</strong>：每个简单 issue 都要先有一条快照，建单从一步变两步；版本、哈希、复合外键对一个不需要编排的 issue 全是噪音。更关键的是 —— <strong>「没有回退能力」本身是信息</strong>。无编排意味着失败只能原地重试或 blocked，不存在「退到上一步」，伪装成有 workflow 会让人误以为它可以回退。</p>
+<pre><code>有编排：run 成功 → 推进到 next；run 失败 → 按 on_failure 路由回退
+无编排：run 成功 → status = done；run 失败 → 原地重试，超限则 blocked（没有回退边）</code></pre>
+  <p>共用的部分一点没变：run 生命周期、CAS 认领、心跳回收、预算闸门、事件流。</p>
+  <p><code>run.stage</code> 是 <code>NOT NULL</code>，无编排 issue 的 run 统一填保留名 <code>'__single__'</code>（定义成一个常量，全局只有这一处魔术字符串）。<code>UNIQUE(issue_id, stage, attempt)</code> 依然工作，所以无编排 issue 的重试计数照常。</p>
+  <p>无编排的 run <strong>恒为 <code>kind='agent'</code></strong>。<code>job</code> 必须有 <code>command</code>，而 command 只能来自 workflow 定义 —— 想跑一条命令，就写一份只含单个 job 阶段的 workflow，而不是把无编排撑成两种形态。</p>
+  <div class="lead">
+    <p><strong>看板上不混排。</strong>列由 workflow 的 stage 生成，无编排的 issue 不属于任何一列，它们进独立的「直接任务」列表视图。不要为了塞进看板造一个虚拟列 —— 一个只有一列的看板不是看板。</p>
+  </div>
+</section>
+
+<section>
+  <h2>5 · 多阶段工作流与回退</h2>
+
+  <div class="fig">
+    <svg viewBox="0 0 680 234" role="img" xmlns="http://www.w3.org/2000/svg" style="font-family:inherit">
+      <title>测试用例编写的六阶段工作流</title>
+      <desc>澄清、用例生成、脚本生成、审脚本、运行、审结果六个阶段，运行失败回退到脚本生成，审脚本打回回退到用例生成。</desc>
+      <defs>
+        <marker id="a3" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+        </marker>
+      </defs>
+      <rect x="40" y="96" width="88" height="56" rx="8" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.5"/>
+      <text x="84" y="118" text-anchor="middle" dominant-baseline="central" font-size="12" font-weight="500" fill="#2C2C2A">澄清</text>
+      <text x="84" y="136" text-anchor="middle" dominant-baseline="central" font-size="11" fill="#5F5E5A">gate</text>
+      <line x1="128" y1="124" x2="140" y2="124" stroke="#888780" stroke-width="1.5" marker-end="url(#a3)"/>
+      <rect x="142" y="96" width="88" height="56" rx="8" fill="#E6F1FB" stroke="#185FA5" stroke-width="0.5"/>
+      <text x="186" y="118" text-anchor="middle" dominant-baseline="central" font-size="12" font-weight="500" fill="#0C447C">用例生成</text>
+      <text x="186" y="136" text-anchor="middle" dominant-baseline="central" font-size="11" fill="#185FA5">agent</text>
+      <line x1="230" y1="124" x2="242" y2="124" stroke="#888780" stroke-width="1.5" marker-end="url(#a3)"/>
+      <rect x="244" y="96" width="88" height="56" rx="8" fill="#E6F1FB" stroke="#185FA5" stroke-width="0.5"/>
+      <text x="288" y="118" text-anchor="middle" dominant-baseline="central" font-size="12" font-weight="500" fill="#0C447C">脚本生成</text>
+      <text x="288" y="136" text-anchor="middle" dominant-baseline="central" font-size="11" fill="#185FA5">agent</text>
+      <line x1="332" y1="124" x2="344" y2="124" stroke="#888780" stroke-width="1.5" marker-end="url(#a3)"/>
+      <rect x="346" y="96" width="88" height="56" rx="8" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.5"/>
+      <text x="390" y="118" text-anchor="middle" dominant-baseline="central" font-size="12" font-weight="500" fill="#2C2C2A">审脚本</text>
+      <text x="390" y="136" text-anchor="middle" dominant-baseline="central" font-size="11" fill="#5F5E5A">gate</text>
+      <line x1="434" y1="124" x2="446" y2="124" stroke="#888780" stroke-width="1.5" marker-end="url(#a3)"/>
+      <rect x="448" y="96" width="88" height="56" rx="8" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.5"/>
+      <text x="492" y="118" text-anchor="middle" dominant-baseline="central" font-size="12" font-weight="500" fill="#085041">运行</text>
+      <text x="492" y="136" text-anchor="middle" dominant-baseline="central" font-size="11" fill="#0F6E56">job</text>
+      <line x1="536" y1="124" x2="548" y2="124" stroke="#888780" stroke-width="1.5" marker-end="url(#a3)"/>
+      <rect x="550" y="96" width="88" height="56" rx="8" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.5"/>
+      <text x="594" y="118" text-anchor="middle" dominant-baseline="central" font-size="12" font-weight="500" fill="#2C2C2A">审结果</text>
+      <text x="594" y="136" text-anchor="middle" dominant-baseline="central" font-size="11" fill="#5F5E5A">gate</text>
+      <path d="M390 96 V68 Q390 58 380 58 H196 Q186 58 186 68 V96" fill="none" stroke="#888780" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#a3)"/>
+      <text x="288" y="50" text-anchor="middle" font-size="11" fill="#888780">打回 · case_bug</text>
+      <path d="M492 152 V182 Q492 192 482 192 H298 Q288 192 288 182 V152" fill="none" stroke="#888780" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#a3)"/>
+      <text x="390" y="212" text-anchor="middle" font-size="11" fill="#888780">失败 · script_bug（env 则原地重跑）</text>
+    </svg>
+    <div class="cap">图 3 · 灰 = gate（人），蓝 = agent（LLM），绿 = job（不调 LLM）；每个 agent / job 节点还带一组 requires，由路由解析成具体机器</div>
+  </div>
+
+  <h3>5.1 workflow 定义</h3>
+<pre><code>id: testcase_v1
+stages:
+  - { name: clarify,       kind: gate,  next: gen_case }
+  - { name: gen_case,      kind: agent, requires: [testcase],
+      artifacts: [testcase], next: gen_script }
+  - { name: gen_script,    kind: agent, requires: [script, python],
+      artifacts: [script],   next: review_script }
+  - { name: review_script, kind: gate,  next: run }
+  - { name: run,           kind: job,   requires: [lab],
+      command: "pytest -q tests/case_${issue_id}.py",
+      artifacts: [run_log],  next: review_result }
+  - { name: review_result, kind: gate,  next: __done__ }
+
+on_failure:                                  # 不是硬编码「回 3」
+  script_bug:  { back_to: gen_script, counts: true }
+  case_bug:    { back_to: gen_case,   counts: true }
+  requirement: { back_to: clarify,    counts: true, hand_to_human: true }
+  env:         { retry_same: true,    counts: false }
+  budget:      { block: true }
+  unknown:     { block: true }
+max_stage_attempts: 3</code></pre>
+  <p>workflow 定义在启动时加载并校验，通过后同步入库成快照（见 4.7）。<strong>YAML 里不写 <code>version</code></strong> —— 版本号由库里自增，因为手动递增版本号是人一定会忘的事；改用 <code>spec_hash</code> 判断内容是否真的变了。</p>
+  <p>结构校验只有四条：所有 <code>next</code> / <code>back_to</code> 指向存在的 stage、恰好一个首阶段、一个 <code>__done__</code> 出口、不存在不可达阶段。不过就拒绝启动 —— 比运行到一半才发现路由写错要好。</p>
+  <p>stage 上的 <code>requires</code> 是<strong>能力标签</strong>，不写具体 agent —— 派发时由路由器解析成某个 <code>actor</code>（见 5.2）。但它能否被满足<strong>不在启动时校验</strong>：这依赖 <code>actor</code> 表的数据，而新 agent 可能刚加、还没注册。若在这里卡住，就会出现「要注册新 agent 才能启动、但服务没启动就注册不了」的死锁。改成在 <code>GET /api/workflows/:id</code> 里标出每个 stage 当前有无 agent 可满足，看板提前提示；真到派发时无人可接，走 <code>route_pending</code>。</p>
+  <div class="lead">
+    <p><strong>每个 stage 的执行者由 workflow 声明的能力决定，<code>issue.assignee_id</code> 不是它。</strong></p>
+    <p>后者只表示「谁在盯这张单」，用于 inbox 与筛选。一张单从人审走到 agent 执行，<code>assignee_id</code> 不会跟着变 —— 混成一个字段，就回答不了「这条为什么出现在我待办里」。</p>
+  </div>
+
+  <h3>5.2 多 agent 路由</h3>
+  <p>人建单，之后每一步由不同的 agent 接力 —— 这是常态。但从「常态」走到「在 YAML 里写死 agent 名」之间差一步：<strong>stage 声明要什么能力，派发那一刻才决定由谁来做。</strong></p>
+  <p>写死名字的代价有三个，都很具体：加一个 agent 要改所有 workflow 文件，改漏一个就跑偏；某个 agent 挂了，凡是指向它的 stage 全部卡住，而它本来换一台机器就能跑；同一个 stage 无法被多台机器分担 —— 单张 issue 是串行的，但十张 issue 应该能并行。</p>
+  <p><strong>保留一个逃生口</strong>：stage 上写 <code>assignee: agent-qa</code> 就跳过路由直接指定。该 actor 不存在时不报错，按无候选处理（<code>route_pending</code> + <code>rejected: unknown_assignee</code>）—— 与 <code>requires</code> 同一个理由：配置不能因为一个未注册的名字就让服务起不来。</p>
+
+  <div class="fig">
+    <svg viewBox="0 0 680 360" role="img" xmlns="http://www.w3.org/2000/svg" style="font-family:inherit">
+      <title>多 agent 路由的完整判定路径</title>
+      <desc>stage 声明 requires 后，四个候选 agent 按能力、在线、负载过滤，两个存活，按亲和排序选中 agent-script；若无候选则不建 run，停在 route_pending 等 daemon 上线。</desc>
+      <defs>
+        <marker id="a4" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+        </marker>
+      </defs>
+
+      <rect x="196" y="28" width="288" height="48" rx="8" fill="#E6F1FB" stroke="#185FA5" stroke-width="0.5"/>
+      <text x="340" y="44" text-anchor="middle" dominant-baseline="central" font-size="12" font-weight="500" fill="#0C447C">stage.requires</text>
+      <text x="340" y="62" text-anchor="middle" dominant-baseline="central" font-size="12" fill="#185FA5">[script, python]</text>
+      <line x1="340" y1="76" x2="340" y2="104" stroke="#888780" stroke-width="1.5" marker-end="url(#a4)"/>
+      <text x="352" y="90" dominant-baseline="central" font-size="11" fill="#888780">候选：kind = agent</text>
+
+      <rect x="26" y="108" width="148" height="68" rx="8" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.5"/>
+      <text x="100" y="128" text-anchor="middle" dominant-baseline="central" font-size="11.5" font-weight="500" fill="#5F5E5A">agent-case</text>
+      <text x="100" y="146" text-anchor="middle" dominant-baseline="central" font-size="10.5" fill="#888780">[testcase]</text>
+      <text x="100" y="164" text-anchor="middle" dominant-baseline="central" font-size="10.5" fill="#888780">× missing:script</text>
+
+      <rect x="186" y="108" width="148" height="68" rx="8" fill="#E6F1FB" stroke="#185FA5" stroke-width="0.5"/>
+      <text x="260" y="128" text-anchor="middle" dominant-baseline="central" font-size="11.5" font-weight="500" fill="#0C447C">agent-script</text>
+      <text x="260" y="146" text-anchor="middle" dominant-baseline="central" font-size="10.5" fill="#185FA5">[script, python]</text>
+      <text x="260" y="164" text-anchor="middle" dominant-baseline="central" font-size="10.5" fill="#185FA5">✓ 亲和命中</text>
+
+      <rect x="346" y="108" width="148" height="68" rx="8" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.5"/>
+      <text x="420" y="128" text-anchor="middle" dominant-baseline="central" font-size="11.5" font-weight="500" fill="#5F5E5A">agent-runner</text>
+      <text x="420" y="146" text-anchor="middle" dominant-baseline="central" font-size="10.5" fill="#888780">[script, lab]</text>
+      <text x="420" y="164" text-anchor="middle" dominant-baseline="central" font-size="10.5" fill="#888780">× missing:python</text>
+
+      <rect x="506" y="108" width="148" height="68" rx="8" fill="#E6F1FB" stroke="#185FA5" stroke-width="0.5"/>
+      <text x="580" y="128" text-anchor="middle" dominant-baseline="central" font-size="11.5" font-weight="500" fill="#0C447C">agent-lab</text>
+      <text x="580" y="146" text-anchor="middle" dominant-baseline="central" font-size="10.5" fill="#185FA5">[script, python]</text>
+      <text x="580" y="164" text-anchor="middle" dominant-baseline="central" font-size="10.5" fill="#185FA5">✓ 在线 · 未满</text>
+
+      <path d="M260 176 V196 H340" fill="none" stroke="#888780" stroke-width="1.5"/>
+      <path d="M580 176 V196 H340" fill="none" stroke="#888780" stroke-width="1.5"/>
+      <line x1="340" y1="196" x2="340" y2="214" stroke="#888780" stroke-width="1.5" marker-end="url(#a4)"/>
+
+      <rect x="170" y="218" width="340" height="44" rx="8" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="0.5"/>
+      <text x="340" y="240" text-anchor="middle" dominant-baseline="central" font-size="12" fill="#444441">排序：亲和 &gt; 负载 &gt; 成功率 &gt; id</text>
+
+      <line x1="340" y1="262" x2="340" y2="282" stroke="#888780" stroke-width="1.5"/>
+      <line x1="185" y1="282" x2="495" y2="282" stroke="#888780" stroke-width="1.5"/>
+      <text x="185" y="272" text-anchor="middle" dominant-baseline="central" font-size="11" fill="#888780">有候选</text>
+      <text x="495" y="272" text-anchor="middle" dominant-baseline="central" font-size="11" fill="#888780">无候选</text>
+      <line x1="185" y1="282" x2="185" y2="290" stroke="#888780" stroke-width="1.5" marker-end="url(#a4)"/>
+      <line x1="495" y1="282" x2="495" y2="290" stroke="#888780" stroke-width="1.5" marker-end="url(#a4)"/>
+
+      <rect x="60" y="294" width="250" height="48" rx="8" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.5"/>
+      <text x="185" y="312" text-anchor="middle" dominant-baseline="central" font-size="12" font-weight="500" fill="#085041">run · actor = agent-script</text>
+      <text x="185" y="330" text-anchor="middle" dominant-baseline="central" font-size="11" fill="#0F6E56">决策写入 run.route</text>
+
+      <rect x="370" y="294" width="250" height="48" rx="8" fill="#FFFFFF" stroke="#888780" stroke-width="0.5" stroke-dasharray="3 3"/>
+      <text x="495" y="312" text-anchor="middle" dominant-baseline="central" font-size="12" font-weight="500" fill="#5F5E5A">route_pending</text>
+      <text x="495" y="330" text-anchor="middle" dominant-baseline="central" font-size="11" fill="#888780">不建 run · 等 daemon 上线</text>
+    </svg>
+    <div class="cap">图 4 · 能力 → 在线 → 负载 → 排序；无候选停在 route_pending，不判失败</div>
+  </div>
+
+  <h4>一、候选过滤：五个条件同时满足</h4>
+  <table>
+    <thead><tr><th style="width:56%">条件</th><th>不满足时的 <code>rejected</code> 标记</th></tr></thead>
+    <tbody>
+      <tr><td><code>kind = 'agent'</code></td><td><code>human</code></td></tr>
+      <tr><td><code>capabilities ⊇ requires</code></td><td><code>missing:&lt;tag&gt;</code></td></tr>
+      <tr><td>runtime 在线</td><td><code>offline</code></td></tr>
+      <tr><td>并发未满：<code>running &lt; max_parallel</code></td><td><code>busy</code></td></tr>
+      <tr><td>不在熔断冷却期</td><td><code>cooling</code></td></tr>
+    </tbody>
+  </table>
+  <p>在线状态<strong>不落库</strong>。daemon 与后端之间是一条常驻 SSE 连接，连接本身就等于在线信号，进程内维护 <code>online: dict[runtime_id, conn_count]</code> 即可。这与第 8 章「不建 runtime 表」一致：重启后这个字典是空的，daemon 在几秒内重连，而重连会触发一次补派（见三）。</p>
+  <p>一个 runtime 可以承载多个 agent（同一台机器上不同模型、不同工具链），它们的 <code>runtime_id</code> 相同，路由按 actor 算并发。<strong>不做 runtime 级总并发</strong> —— 一个 runtime 上通常只有两三个 agent，调小某个 actor 的 <code>max_parallel</code> 就能压住；两层配额在小规模下只会让人算不清。</p>
+
+  <h4>二、排序：必须确定性</h4>
+  <p>同一组输入必须选出同一个 agent。随机选会带来「同一个 issue 重跑两次派到两台机器」，出了问题无法复现。排序键只有四个，依次比较：</p>
+<pre><code>亲和（同 issue 上次机器 run 的 actor）
+  &gt; 负载比 running / max_parallel 低
+  &gt; 近 20 次 run 成功率高
+  &gt; actor.id 小</code></pre>
+  <p>亲和排第一，因为<strong>上下文有成本</strong>：<code>gen_case</code> 在 A 机器跑过，A 上留有它刚拉的仓库和缓存；换到 B，产物拉得到，但中间过程丢了。这是「不同 agent 接力」最容易被忽略的隐性损耗。</p>
+
+  <h4>三、无候选时不建 run</h4>
+  <p>这是本节最重要的一条：<strong>路由失败不能落成 run 失败。</strong></p>
+  <p>issue 停在 <code>active</code>，<code>current_stage</code> 指向那个 stage，但没有活跃 run，写一条 <code>event(type='route_pending')</code>。看板上这张卡显示「等待 agent」，不是「失败」。daemon 上线后补派。</p>
+  <p>「待派发」不需要新字段，它是派生的：<code>status='active'</code> + <code>current_stage</code> 非空 + 无活跃 run + <code>stage.kind != 'gate'</code>。</p>
+<pre><code>def on_runtime_online(runtime_id):
+    for issue in pending_dispatch():        # 走 idx_issue_board
+        dispatch(issue, issue.current_stage)</code></pre>
+  <p>把「没人接」和「接了之后失败」分成两种状态，因为前者会自愈、后者不会。混成一个 <code>failed</code>，运维看到的就是一堆假失败。</p>
+
+  <h4>四、决策必须落库</h4>
+  <p><code>run.route</code> 存一份 JSON：</p>
+<pre><code>{
+  "rule": "affinity",
+  "requires": ["script", "python"],
+  "candidates": [7, 3, 9],
+  "rejected": { "5": "cooling", "8": "busy", "2": "missing:python" },
+  "chosen": 7
+}</code></pre>
+  <p>agent 一多，「为什么派给它」是第一个被问到、且<strong>唯一无法从其他数据反推</strong>的问题。没有这份记录就只能猜。</p>
+
+  <h4>五、熔断：从 run 表算，不建表</h4>
+  <p>某 actor 最近 3 次结束的 run 全部 <code>failed</code> 且 <code>error_class != 'env'</code> → 冷却 10 分钟。</p>
+<pre><code>SELECT status, error_class, ended_at FROM run
+ WHERE actor_id = ? AND status IN ('succeeded','failed')
+ ORDER BY id DESC LIMIT 3</code></pre>
+  <p><code>env</code> 不算，因为那是目标机的问题、不是这个 agent 的问题 —— 与 5.3 的失败分类同一条逻辑。</p>
+
+  <h4>六、全自动到 done</h4>
+  <p>不需要任何新机制：<strong>写一个没有 gate 的 workflow 就是全自动。</strong></p>
+<pre><code>id: tc_auto_v1
+stages:
+  - { name: gen_case,   kind: agent, requires: [testcase],
+      artifacts: [testcase], next: gen_script }
+  - { name: gen_script, kind: agent, requires: [script],
+      artifacts: [script],   next: run }
+  - { name: run,        kind: job,   requires: [lab],
+      command: "pytest -q tests/case_${issue_id}.py",
+      artifacts: [run_log],  next: __done__ }
+on_failure:
+  script_bug: { back_to: gen_script, counts: true }
+  env:        { retry_same: true,    counts: false }
+  unknown:    { block: true }</code></pre>
+  <p>人只做两件事：建单，以及在 <code>requirement</code> / <code>unknown</code> 转成 <code>blocked</code> 时看一眼 inbox。</p>
+  <p><strong>gate 是可选的人审环节，不是流程的必经段。</strong>需要人把关就写 <code>kind: gate</code>，不需要就不写 —— 同一套代码支持两种形态，因为 gate 和 agent 只是 stage 的两种 <code>kind</code>。</p>
+  <p><code>unknown</code> 在全自动工作流里必须保留 <code>block: true</code>。全自动最危险的不是失败，是「agent 认为自己成功了但实际做错了」；判不清就停下，比自动往下走安全。</p>
+
+  <h4>七、router 是 driver 内部的一个函数</h4>
+<pre><code>def dispatch(issue, stage):
+    st = get_stage(issue, stage)
+    actor, trace = route(issue, st)             # 纯函数，不写库
+    if actor is None:
+        emit(issue, 'route_pending',
+             {'stage': stage, 'requires': st.requires, 'trace': trace})
+        return
+    run = create_run(issue, stage, actor, trace)   # 与 emit 同一事务
+    notify_runtime(actor.runtime_id, run)</code></pre>
+  <p><code>route()</code> 只读状态、只返回结果，因此<strong>任何一次派发都能离线重放</strong>。它不是独立服务，也不调用模型 —— 路由一旦需要模型判断，就再也无法解释清楚为什么派给了谁。</p>
+
+  <h3>5.3 失败路由表</h3>
+  <p>第 5 步失败<strong>不等于</strong>回第 3 步。这是回退设计里最容易做错的地方。</p>
+  <table>
+    <thead><tr><th style="width:36%">失败信号</th><th style="width:18%">error_class</th><th style="width:26%">回退目标</th><th>计入次数</th></tr></thead>
+    <tbody>
+      <tr><td>语法错 / import 失败 / 断言写法错</td><td><code>script_bug</code></td><td>→ 脚本生成</td><td>是</td></tr>
+      <tr><td>断言正确但预期值错、步骤漏了</td><td><code>case_bug</code></td><td>→ 用例生成</td><td>是</td></tr>
+      <tr><td>SSH 断、盘掉线、目标机不可达</td><td><code>env</code></td><td>→ 原地重跑</td><td><strong>否</strong></td></tr>
+      <tr><td>验收标准含糊、没说清测什么</td><td><code>requirement</code></td><td>→ 澄清（转人）</td><td>是</td></tr>
+      <tr><td>超预算 / 连续失败 ≥3 次</td><td><code>budget</code></td><td>→ blocked</td><td>—</td></tr>
+    </tbody>
+  </table>
+  <p><code>env</code> 不计入次数是关键：真机抖动几次就把回退额度用光，整个工作流会废掉。</p>
+
+  <h3>5.4 回退必须携带失败证据</h3>
+  <p>只把 <code>current_stage</code> 改回去重跑，agent 看到的输入和上次一样，会生成几乎一样的脚本。三轮之后 token 烧完，结论是「搞不定」。</p>
+<pre><code>{
+  "base": { "artifact_id": 412, "hash": "sha256:9f3a..." },
+  "feedback": {
+    "from_run": 887,
+    "error_class": "script_bug",
+    "signal": "AssertionError: LBA 0x1a2f expect 0x00 got 0x47",
+    "log_artifact": 915
+  },
+  "constraints": [
+    "只改断言与重试逻辑",
+    "不得修改 test vector 与步骤序列",
+    "不得修改验收标准"
+  ]
+}</code></pre>
+  <p><code>constraints</code> 比 feedback 更重要。没有它，agent 回退时会顺手改用例，问题从「脚本错了」变成「用例被悄悄改了」，上一轮 review 结论直接作废。</p>
+  <p><code>feedback</code> 里<strong>没有「可能的原因」这一项</strong>。要写它就得懂日志，而产出失败的那个 <code>job</code> run 根本不调模型；让 agent 自己从 <code>signal</code> + <code>log_artifact</code> 里读，比让上一个进程塞一句猜测更准。</p>
+  <p><code>error_class</code> 同理，由 daemon 用<strong>退出码 + 日志正则</strong>判定；判不出就报 <code>unknown</code>，按路由转 <code>blocked</code> 交给人。不允许「猜一个最像的」—— 猜错会把回退引到错误的阶段，而且要绕三轮才发现。</p>
+
+  <h3>5.5 回退后下游必须失效</h3>
+  <p>脚本从 v1 变成 v2 后，「审脚本」的通过结论作废了 —— 它审的是 v1。</p>
+<pre><code>UPDATE artifact SET stale = 1
+ WHERE issue_id = ?
+   AND stage IN (?, ?, ?);   -- 回退目标（含）之后的全部阶段，由 workflow 静态算出</code></pre>
+  <p>SQLite 没有 <code>= ANY(array)</code>，下游阶段列表在应用层拼成 <code>IN (?, ?, ...)</code> 占位符。阶段数量来自 workflow 定义、完全固定，既不存在注入风险，也不存在拼接长度问题。</p>
+  <p>正向推进遇到 <code>stale=true</code> 的产物，<strong>必须重走该阶段，不能跳</strong>。这是「重入式工作流」：回退只重跑受影响的下游。</p>
+</section>
+
+<section>
+  <h2>6 · 核心流程与一致性</h2>
+  <h3>6.1 两个循环</h3>
+  <ul>
+    <li><strong>gate 循环</strong>：后端开启 gate → issue 标黄进 inbox → 人 approve / reject → <code>stage_driver</code> 推进或回退。不产生 run，不会超时。</li>
+    <li><strong>run 循环</strong>：后端派发 → SSE 下行 → daemon CAS 认领 → 沙箱执行 → 批量上报事件 + 心跳 → <code>complete</code> → <code>stage_driver</code> 推进或按路由回退。</li>
+  </ul>
+
+  <h3>6.2 派发只需一行 CAS</h3>
+<pre><code>UPDATE run
+   SET status = 'claimed', claim_token = ?, claimed_at = ?, heartbeat_at = ?
+ WHERE id = ? AND status = 'queued';
+-- cursor.rowcount == 0 → 已被抢，返回 409，daemon 静默放弃</code></pre>
+  <p>SQLite 的单条 <code>UPDATE</code> 本身是原子的，<code>rowcount</code> 就是 CAS 的结果 —— 换数据库时这一行的语义也不变。</p>
+  <p><code>heartbeat_at</code> 必须在认领时就写。如果留 <code>NULL</code>，下面那条回收查询的 <code>heartbeat_at &lt; now - 60s</code> 会因 <code>NULL</code> 比较恒为 unknown 而永不命中 —— 一个认领后崩溃的 run 会永久停在 <code>claimed</code>，把整张单子卡死。</p>
+
+  <h3>6.3 心跳只对 machine run 生效</h3>
+  <p>daemon 每 15s 发心跳；后端 60s 未见心跳 → <code>run=failed, error_class='env'</code>，作废 <code>claim_token</code>。人审不产生 run，所以审一天也不会被回收。</p>
+  <p>心跳回收由一个后台循环执行，每 30s 扫一次：</p>
+<pre><code>SELECT id FROM run
+ WHERE status IN ('claimed','running')
+   AND COALESCE(heartbeat_at, claimed_at) &lt; ?;   -- ? = now_ms - 60000</code></pre>
+  <p>这个循环和 API 在同一个进程里，用 <code>asyncio</code> 定时任务即可，不需要独立的 scheduler 进程。</p>
+
+  <h3>6.4 daemon 的权限边界</h3>
+  <blockquote>
+    <p>daemon <strong>不能直接写</strong> <code>issue.status</code> / <code>current_stage</code>，只能通过声明式端点（<code>complete</code> / <code>block</code>）提交「声明」，由后端 <code>stage_driver</code> 执行状态迁移。</p>
+  </blockquote>
+  <p>daemon 声明「我失败了，error_class=script_bug」，回退到哪由一个中心函数决定。判定逻辑不能分散在 daemon 里，否则多 runtime 行为不一致。</p>
+
+  <h3>6.5 SQLite 的并发模型</h3>
+  <p>SQLite 是<strong>单写者</strong>数据库。这不是缺陷，但必须知道边界在哪，否则会写出偶发 <code>database is locked</code> 的代码 —— 这类 bug 只在并发时出现，最难复现。</p>
+
+  <div class="card">
+    <h4>一、所有写事务都用 BEGIN IMMEDIATE</h4>
+    <p>这是 SQLite 最经典的坑：默认的 <code>BEGIN</code> 是 deferred，事务从读锁开始，遇到第一条写语句才尝试升级。如果此时另一个连接已持有写锁，<strong>升级会立即返回 <code>SQLITE_BUSY</code>，<code>busy_timeout</code> 并不生效</strong>（它只在等待初始锁时生效）。显式 <code>IMMEDIATE</code> 让超时真正起作用，写入自动排队。</p>
+  </div>
+<pre><code>@contextmanager
+def write_tx():
+    conn = get_conn()
+    conn.execute("BEGIN IMMEDIATE")   # 开始就抢写锁，不等第一条 UPDATE
+    try:
+        yield conn
+        conn.execute("COMMIT")
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise</code></pre>
+  <p>实测对照（另一连接先持有写锁，<code>busy_timeout = 3000</code>）：</p>
+  <table>
+    <thead><tr><th style="width:52%">写法</th><th>结果</th></tr></thead>
+    <tbody>
+      <tr><td><code>BEGIN</code> → <code>SELECT</code> → <code>UPDATE</code></td><td><strong>0.00s 立即</strong> <code>database is locked</code></td></tr>
+      <tr><td><code>BEGIN IMMEDIATE</code></td><td>等满 <strong>3.13s</strong> 才放弃 —— 超时确实生效</td></tr>
+      <tr><td>锁释放后 <code>BEGIN IMMEDIATE</code></td><td>0.00s 抢到</td></tr>
+    </tbody>
+  </table>
+  <p>同一台机器上 20 个线程并发 <code>BEGIN IMMEDIATE</code> 写同一行，全部成功、无重试逻辑，总耗时 0.04s。排队从来不是问题，问题是升级路径根本等不到锁。</p>
+
+  <div class="card">
+    <h4>二、读操作不进写事务</h4>
+    <p>WAL 模式下读不阻塞写、写不阻塞读。看板查询、事件回放、gate 列表全部走普通读连接，不会和 daemon 的心跳上报互相卡住。</p>
+  </div>
+
+  <div class="card">
+    <h4>三、单写者串行，在这个规模下是优势</h4>
+    <p><code>complete</code> 一个 run 要写四张表：更新 <code>run</code>、插 <code>artifact</code>、插 <code>event</code>、改 <code>issue</code>。在 Postgres 下这是四表事务；在 SQLite 下是一个 <code>BEGIN IMMEDIATE</code> 包住的四次写，天然原子。<strong>一个 run 的结果不可能只写一半</strong> —— 这是选 SQLite 带来的实质好处，不只是省一个服务。</p>
+  </div>
+  <p>写 QPS 上限约几百（受 fsync 与锁排队限制）。本系统的写只来自人点击和 daemon 上报，峰值是个位数，留了两个数量级余量。</p>
+
+  <div class="card">
+    <h4>四、必须单进程运行</h4>
+    <p><code>uvicorn --workers 1</code>。<code>--workers</code> 大于 1 会有两个后果：进程内事件广播各发各的（浏览器只能收到部分事件），以及多进程争抢写锁。广播不能跨进程，所以这里不是建议，是硬约束。</p>
+  </div>
+
+  <h3>6.6 四条不变量</h3>
+  <p>实现时任何改动都不能破坏这四条，它们是整个系统正确性的地基：</p>
+  <div class="card">
+    <h4>一、同一时刻，一个 issue 最多有一个活跃 run</h4>
+    <p><code>status IN ('queued','claimed','running')</code>。由 <code>stage_driver</code> 保证：推进前先检查是否存在活跃 run，有则不派发新的。</p>
+  </div>
+  <div class="card">
+    <h4>二、current_stage 只能由 stage_driver 写</h4>
+    <p>任何其他代码路径直接改这个字段都是 bug。</p>
+  </div>
+  <div class="card">
+    <h4>三、后端单进程运行</h4>
+    <p>进程内广播与 <code>BEGIN IMMEDIATE</code> 的排队假设都依赖这一点。</p>
+  </div>
+  <div class="card">
+    <h4>四、路由是确定性的，且决策必须落 run.route</h4>
+    <p>同一组输入必须选出同一个 agent；不允许随机、不允许负载均衡式的漂移。agent 一多，「为什么派给它」是唯一无法从其他状态反推的问题。</p>
+  </div>
+
+  <h3>6.7 驱动入口与无编排路径</h3>
+  <p><code>stage_driver</code> 有三个入口：issue 创建、run 结束、gate 动作。缺了「issue 创建」，新建的单子没人派首个 run —— workflow 写得再对也不会动。</p>
+<pre><code>SINGLE = '__single__'
+
+def on_issue_created(issue):
+    spec = load_snapshot(issue.workflow_id, issue.workflow_version) if issue.workflow_id else None
+    if spec is None:
+        return dispatch(issue, stage=SINGLE)      # 无编排：直接派首个 run
+    first = spec.first_stage
+    if first.kind == 'gate':
+        return open_gate(issue, first)             # 纯人工，或首个阶段就是要人确认
+    return dispatch(issue, stage=first.name)</code></pre>
+  <p>无编排 issue 没有 gate 阶段，之后只走「run 结束」这一条。分支判断只有一处：</p>
+<pre><code>def on_run_finished(run):
+    issue = load_issue(run.issue_id)
+
+    if issue.workflow_id is None:              # 无编排
+        if run.status == 'succeeded':
+            return set_status(issue, 'done')   # 没有 next 可推
+        return retry_or_block(issue, run)      # 没有 back_to 可退
+
+    spec = load_snapshot(issue.workflow_id, issue.workflow_version)
+    return advance_or_revert(issue, run, spec) # 有编排</code></pre>
+  <p><code>retry_or_block</code> 的逻辑：<code>env</code> 类原地重试且不计次，其余计入 <code>stage_attempts</code>，累计超过 <code>max_stage_attempts</code> 则 <code>blocked</code>。它和编排路径的 <code>env</code> 分支共用同一份实现 —— <strong>唯一的区别是无编排没有回退边，只能原地重试。</strong></p>
+  <p><code>advance_or_revert</code> 是编排路径，也是唯一会写 <code>current_stage</code> 的地方。两个分支都不会让 <code>current_stage</code> 从 NULL 变成非空，也不会反过来 —— 形态在 issue 创建时定死。</p>
+</section>
+
+<section>
+  <h2>7 · 接口契约</h2>
+  <h3>7.1 面向人</h3>
+  <table>
+    <thead><tr><th style="width:66px">方法</th><th style="width:38%">路径</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td><code>GET</code></td><td><code>/api/issues?status=&amp;stage=&amp;workflow=</code></td><td>看板列（列 = workflow 的 stage）</td></tr>
+      <tr><td><code>POST</code></td><td><code>/api/issues</code></td><td>建 issue。<code>workflow_id</code> 可选，省略 = 无编排</td></tr>
+      <tr><td><code>GET</code></td><td><code>/api/issues?unplanned=1</code></td><td>「直接任务」列表：<code>workflow_id IS NULL</code></td></tr>
+      <tr><td><code>PATCH</code></td><td><code>/api/issues/:id</code></td><td>改标题/指派，走 <code>If-Match: version</code></td></tr>
+      <tr><td><code>POST</code></td><td><code>/api/issues/:id/comment</code></td><td>写 <code>event(type='comment')</code></td></tr>
+      <tr><td><code>GET</code></td><td><code>/api/issues/:id/events?after=</code></td><td>历史回放 + 增量拉取</td></tr>
+      <tr><td><code>GET</code></td><td><code>/api/issues/:id/artifacts</code></td><td>产物列表（含 stale、可 diff）</td></tr>
+      <tr><td><code>POST</code></td><td><code>/api/issues/:id/gate</code></td><td><strong>gate 操作</strong>：<code>{stage, action: approve|reject, note, back_to?}</code></td></tr>
+      <tr><td><code>GET</code></td><td><code>/api/issues/:id/stream</code></td><td>SSE，实时事件与进度</td></tr>
+      <tr><td><code>GET</code></td><td><code>/api/inbox</code></td><td>所有 <code>awaiting_gate</code> 非空的 issue</td></tr>
+      <tr><td><code>GET</code></td><td><code>/api/workflows/:id</code></td><td>阶段图定义：看板列顺序、gate 名称。默认取最新版本</td></tr>
+      <tr><td><code>POST</code></td><td><code>/api/issues/:id/workflow</code></td><td>显式迁移到指定版本，校验冲突则 409</td></tr>
+      <tr><td><code>GET</code></td><td><code>/api/actors</code></td><td>agent 清单：<code>capabilities</code>、<code>max_parallel</code>、是否在线、当前负载、是否冷却</td></tr>
+      <tr><td><code>POST</code></td><td><code>/api/actors</code></td><td>注册 agent：<code>{name, runtime_id, capabilities, max_parallel}</code>，<code>kind</code> 固定 <code>agent</code></td></tr>
+      <tr><td><code>PATCH</code></td><td><code>/api/actors/:id</code></td><td>改能力标签或并发数。只影响之后的派发，不改已发出的 run</td></tr>
+      <tr><td><code>GET</code></td><td><code>/api/runs/:id/route</code></td><td>该次派发的完整决策 trace（<code>run.route</code> 原样返回）</td></tr>
+    </tbody>
+  </table>
+  <p><code>gate</code> 是唯一的人侧状态变更入口。<code>reject</code> 必须带 <code>back_to</code>，否则后端无法判断回退目标。</p>
+  <p>前端渲染看板时先拉 <code>/api/workflows/:id</code> 拿列顺序，再拉 <code>/api/issues</code> 拿卡片 —— <strong>列不是写死的</strong>，加一个 stage 只改 YAML，前端不用动。</p>
+  <p>一个实例可以注册多份 YAML，但<strong>看板一次只渲染一个 workflow</strong>（顶部切换，默认取最近在用那份），列表接口用 <code>?workflow=</code> 过滤。阶段改名后，钉在旧版本上的单子按自己的 stage 名匹配列，匹配不到的落到末尾「历史阶段」列并标出版本号 —— 不要为了列对齐去自动迁移 issue。</p>
+  <p>乐观锁靠 <code>version</code> 字段：</p>
+<pre><code>UPDATE issue SET title = ?, version = version + 1, updated_at = ?
+ WHERE id = ? AND version = ?;
+-- rowcount == 0 → 409，页面上的数据已被别人改过</code></pre>
+  <p><code>stage_driver</code> 写 <code>status</code> / <code>current_stage</code> 时同样要 <code>version = version + 1</code>。否则前端拿着推进前的 version 提交 PATCH，会一次把刚推进的阶段覆盖回旧值 —— 这类覆盖不报错，只是单据悄悄退回去。</p>
+
+  <h3>7.2 面向 daemon（全部出站）</h3>
+  <table>
+    <thead><tr><th style="width:66px">方法</th><th style="width:38%">路径</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td><code>GET</code></td><td><code>/api/runtime/stream?runtime_id=</code></td><td>SSE，推送本 runtime 的 job</td></tr>
+      <tr><td><code>POST</code></td><td><code>/api/runs/:id/claim</code></td><td>CAS 认领，返回 <code>claim_token</code> + <code>inputs</code></td></tr>
+      <tr><td><code>POST</code></td><td><code>/api/runs/:id/heartbeat</code></td><td>心跳</td></tr>
+      <tr><td><code>POST</code></td><td><code>/api/runs/:id/events</code></td><td>批量上报（≤200 条/次）</td></tr>
+      <tr><td><code>POST</code></td><td><code>/api/runs/:id/complete</code></td><td><code>{status, error_class?, artifacts?, usage}</code></td></tr>
+      <tr><td><code>POST</code></td><td><code>/api/issues/:id/block</code></td><td>声明阻塞，由后端转 blocked</td></tr>
+    </tbody>
+  </table>
+  <p><strong>注意</strong>：<code>complete</code> 提交的是 <code>error_class</code> 枚举，不是「回退到哪个阶段」。路由由后端按 workflow 定义决定。</p>
+
+  <h3>7.3 两个 SSE 端点，同一套机制</h3>
+  <p>同一个 handler、同一套重连与游标逻辑，暴露两个入口 —— 浏览器订阅 issue 流，daemon 订阅 runtime 流。</p>
+  <p>事件写入数据库后，在事务提交后调用：</p>
+<pre><code>broadcast(issue_id, event)     # 进程内，按 issue_id 分发给所有订阅者</code></pre>
+  <p>订阅者就是一个 <code>dict[int, set[asyncio.Queue]]</code>。没有网络跳转、没有额外序列化、没有额外的服务依赖 —— 这是单进程架构换来的直接好处。</p>
+  <p>游标用 <code>event.id</code>，客户端断线重连带 <code>Last-Event-ID</code> 即可补齐：</p>
+<pre><code>SELECT * FROM event WHERE issue_id = ? AND id &gt; ? ORDER BY id;   -- 走 idx_event_issue</code></pre>
+
+  <h3>7.4 事件分批上报</h3>
+  <p>daemon 本地缓冲，200ms 或 50 条刷一次，单次上限 200 条。不要一条一请求 —— 每次上报都是一个 <code>BEGIN IMMEDIATE</code>，一条一请求会把写锁排队放大两个数量级。</p>
+  <p>一次批量上报 = 一个事务：<code>executemany</code> 插 N 条 event，一次 <code>COMMIT</code>，一次广播。</p>
+</section>
+
+<section>
+  <h2>8 · 安全边界</h2>
+  <ul>
+    <li><strong>agent 不能直接 push main</strong>，只能开分支 + PR（<code>artifact(kind='pr')</code>）。人和 agent 走同一套 review。</li>
+    <li><strong>daemon 凭证写在服务端 <code>config.toml</code></strong>：一行一个 runtime，只能操作分配给本 runtime 的 run。吊销 = 删行重启。不建 runtime 表 —— 在线状态由 SSE 连接本身表达（见 5.2），<code>actor.runtime_id</code> 只用于判断「这个 agent 在哪台机器上」。</li>
+    <li><strong>工具白名单</strong>：限制可执行命令集，默认禁止网络出站。</li>
+    <li><strong>prompt 注入防线</strong>：issue body 与仓库内容一律视为不可信输入。</li>
+    <li><strong>artifact 只读</strong>：agent 不能修改已产出的 artifact，只能产生新版本。</li>
+    <li><strong>环境隔离</strong>：<code>agent</code> 阶段的 CLI 在容器或独立用户下运行，不继承宿主的环境变量与 ssh key。</li>
+    <li><strong>数据库文件</strong>：<code>data/app.db</code> 含全部 issue 正文与审计记录，权限设 <code>600</code>，不放进 Web 静态目录。</li>
+  </ul>
+</section>
+
+<section>
+  <h2>9 · 预算闸门</h2>
+  <p><code>job</code> 阶段没有 token 消耗，只按 token 算会漏掉「跑了一整天」；而回退会重开 run，只按单次 run 设限则回退越多额度越宽。所以预算必须分层。</p>
+  <h3>9.1 两层预算</h3>
+<pre><code>// issue.budget —— 建单时由服务端从 config.toml 的 [budget.default] 展开写入
+{
+  "max_tokens_total": 2000000,     // 整个 issue 累计，不随 run 重置
+  "max_wall_clock_s": 86400,       // 整个 issue 累计
+  "max_tokens_per_run": 200000,
+  "max_runs": 20
+}</code></pre>
+  <table>
+    <thead><tr><th style="width:26%">层级</th><th style="width:40%">作用</th><th>超限后果</th></tr></thead>
+    <tbody>
+      <tr><td>per-run</td><td>防止单次跑飞</td><td>run failed, <code>error_class=budget</code></td></tr>
+      <tr><td>per-issue 累计</td><td>防止回退刷额度</td><td>issue → blocked</td></tr>
+    </tbody>
+  </table>
+  <p><code>issue.budget</code> 的列默认值是 <code>{}</code>，但<strong>空对象不等于「无限制」</strong> —— 建单时把 <code>config.toml</code> 的默认预算展开写进去，<code>{}</code> 只在读旧数据时兜底成默认值。</p>
+  <p>阶段失败上限（<code>max_stage_attempts</code>）是<strong>工作流属性</strong>，写在 YAML 里，不进 budget。同一个阈值出现在两处，改的人一定会只改一处。</p>
+  <p>累计值不单独存字段，直接对 <code>run</code> 表求和 —— 走 <code>idx_run_issue</code> 索引，几十行的表，比维护一个容易不同步的累加字段可靠。</p>
+<pre><code>SELECT COALESCE(SUM(tokens_in + tokens_out), 0) AS used,
+       COALESCE(SUM(wall_clock_s), 0)           AS spent
+  FROM run WHERE issue_id = ?;</code></pre>
+  <h3>9.2 按 kind 计费</h3>
+  <p><code>agent</code> run 计 token + 墙钟；<code>job</code> run 只计墙钟，token 恒为 0。<code>job</code> 阶段「跑了一整天」必须能被 <code>max_wall_clock_s</code> 抓住。</p>
+  <h3>9.3 三道防死循环闸</h3>
+  <ul>
+    <li><strong>阶段级计数</strong>：<code>stage_attempts[stage] ≥ max_stage_attempts</code> → blocked，进 inbox。阈值有编排时取 YAML，无编排时取 <code>config.toml</code> 的 <code>[limits] max_stage_attempts</code> —— 后者只是兜底，不是第二份定义</li>
+    <li><strong>产物去重</strong>：新 artifact 的 <code>content_hash</code> 与上一版相同 → 直接判 failed，不进运行</li>
+    <li><strong>run 数上限</strong>：<code>COUNT(*) FROM run WHERE issue_id = ?</code> 超过 <code>max_runs</code> → blocked。<code>env</code> 类重试不计次，这一道防的正是「环境一直不好、无限重跑」</li>
+  </ul>
+</section>
+
+<section>
+  <h2>10 · 技术选型</h2>
+  <p>小团队的最优解是<strong>单语言、零外部服务、无构建</strong>。每引入一个组件，就多一份调试成本。</p>
+  <table>
+    <thead><tr><th style="width:18%">层</th><th style="width:36%">选型</th><th>理由</th></tr></thead>
+    <tbody>
+      <tr><td>语言 / 后端</td><td>Python 3.12 + FastAPI</td><td>同一套代码既能做 API 又能做 daemon</td></tr>
+      <tr><td>数据库</td><td><strong>SQLite（WAL）</strong>，标准库 <code>sqlite3</code></td><td>零依赖、单文件、备份即拷贝</td></tr>
+      <tr><td>数据访问</td><td>手写 SQL + <code>sqlite3.Row</code></td><td>六张表不值得引入 ORM，SQL 都在一个 <code>store.py</code> 里</td></tr>
+      <tr><td>迁移</td><td><code>schema.sql</code> + <code>PRAGMA user_version</code></td><td>一条 <code>if version &lt; N</code> 判断，比迁移框架短</td></tr>
+      <tr><td>前端</td><td>Jinja2 + HTMX + Alpine.js</td><td>无构建步骤，看板交互够用</td></tr>
+      <tr><td>实时</td><td>SSE + 进程内广播</td><td>单进程，不需要 NOTIFY / Redis</td></tr>
+      <tr><td>daemon</td><td>同一个 Python 包</td><td>与后端共享模型定义，避免契约漂移</td></tr>
+      <tr><td>调度</td><td>进程内 <code>asyncio</code> 定时任务</td><td>心跳回收与超时扫描不值得独立进程</td></tr>
+      <tr><td>存储</td><td>本地目录 <code>artifacts/{issue}/{stage}/v{n}</code></td><td>单机够用，接 S3 只需换一个读写函数</td></tr>
+      <tr><td>部署</td><td><code>systemd</code> 或直接 <code>uvicorn --workers 1</code></td><td>一个进程，没有容器也不影响交付</td></tr>
+    </tbody>
+  </table>
+  <p>依赖清单基本就是 FastAPI + Uvicorn + PyYAML + Jinja2。数据库驱动不用装 —— <code>sqlite3</code> 在标准库里。</p>
+  <p>配置只有一个 <code>config.toml</code>：各 runtime 的 token、建单默认预算、无编排用的阶段失败上限。用标准库 <code>tomllib</code> 启动时读一次，不引配置库 —— 需要热更新的配置项，这个系统一个都没有。</p>
+  <div class="card">
+    <h4>为什么不用 ORM</h4>
+    <p>六张表、十几条查询，SQLAlchemy 的模型声明会比 SQL 本身更长。而且 <code>BEGIN IMMEDIATE</code>、<code>PRAGMA</code> 这类 SQLite 特有操作最终还是要落回原生 SQL。不如一开始就写 SQL，一个 <code>store.py</code> 装得下全部。</p>
+  </div>
+  <div class="card">
+    <h4>为什么不用 aiosqlite</h4>
+    <p><code>sqlite3</code> 的调用是微秒级的本地 C 调用，包一层异步驱动只增加了一层线程和一层 <code>await</code>，并没有真的并行。正确做法是把路由声明为 <code>def</code>（不是 <code>async def</code>），FastAPI 会自动丢到线程池，事件循环不会被阻塞。</p>
+  </div>
+  <div class="card">
+    <h4>为什么不用 Alembic</h4>
+    <p>SQLite 的 <code>ALTER TABLE</code> 支持有限（不能删列、不能改列类型），框架生成的回滚脚本大概率是「建新表、拷数据、改名」。与其维护一堆看不懂的迁移，不如手写三段 SQL 配 <code>PRAGMA user_version</code>。</p>
+  </div>
+  <div class="card">
+    <h4>备份：不要 cp app.db</h4>
+    <p>WAL 模式下数据还可能在 <code>-wal</code> 文件里，单独拷主文件会丢最近的事务。用 <code>sqlite3 data/app.db "VACUUM INTO 'backup/app-$(date +%F).db'"</code>，产出的是完整一致的单文件。</p>
+  </div>
+  <div class="card">
+    <h4>为什么不用 React / Vue</h4>
+    <p>看板只有「拖动、展开、评论、审阅」四类交互，HTMX 的局部刷新足以覆盖，且不需要 node 工具链 —— 对小团队是实打实的减负。</p>
+  </div>
+</section>
+
+<section>
+  <h2>11 · 实现清单</h2>
+  <p>按依赖顺序排列，前一项完成才能开始后一项。总计 9 个模块，一个人一周可完成骨架，两人两周可完整跑通。</p>
+  <table>
+    <thead><tr><th style="width:36px">#</th><th style="width:22%">模块</th><th>职责</th></tr></thead>
+    <tbody>
+      <tr><td>1</td><td>存储层</td><td><code>schema.sql</code>、连接工厂、<code>PRAGMA</code>、<code>write_tx()</code>、<code>user_version</code> 迁移</td></tr>
+      <tr><td>2</td><td>workflow 快照</td><td>YAML 解析 + 启动期结构校验（闭环、可达性）+ 哈希入库，旧版本永不覆盖</td></tr>
+      <tr><td>3</td><td><code>stage_driver</code></td><td><strong>核心</strong>：推进 / 回退 / 失效传播 / 计数闸门</td></tr>
+      <tr><td>4</td><td>router</td><td>候选过滤 / 确定性排序 / 熔断 / trace 落库</td></tr>
+      <tr><td>5</td><td>issue API</td><td>CRUD、gate 动作、inbox 查询</td></tr>
+      <tr><td>6</td><td>run API</td><td>claim / heartbeat / events / complete / block</td></tr>
+      <tr><td>7</td><td>事件流</td><td>SSE handler、进程内广播、游标补齐、daemon 上线补派</td></tr>
+      <tr><td>8</td><td>daemon</td><td>SSE 订阅、CAS 认领、子进程执行、批量上报、心跳</td></tr>
+      <tr><td>9</td><td>看板页</td><td>列 = stage，卡片 = issue，详情页嵌事件流</td></tr>
+    </tbody>
+  </table>
+  <p>模块 3 和 4 是唯一有真实复杂度的地方，其余都是薄壳。<strong>建议先给 <code>stage_driver</code> 写状态迁移测试，再写实现</strong> —— 它是全系统的判定中心，一旦有 bug，表现是「issue 卡在奇怪的状态」，很难排查。</p>
+  <h3>stage_driver 的输入输出穷举</h3>
+  <table>
+    <thead><tr><th style="width:22%">触发</th><th style="width:30%">输入</th><th>结果</th></tr></thead>
+    <tbody>
+      <tr><td>issue 创建</td><td>首阶段是 gate</td><td>开 gate，<code>status = active</code>，<code>awaiting_gate = 首阶段</code></td></tr>
+      <tr><td>issue 创建</td><td>首阶段是 agent / job，或无编排</td><td>派发首个 run，<code>status = active</code></td></tr>
+      <tr><td>run succeeded</td><td><strong>无编排</strong></td><td><code>status = done</code>，不碰 <code>current_stage</code></td></tr>
+      <tr><td>run failed</td><td><strong>无编排</strong></td><td>原地重试（attempt+1）；超限则 <code>blocked</code>。无回退边</td></tr>
+      <tr><td>run succeeded</td><td>非末阶段</td><td><code>current_stage = next</code>；若 next 是 gate 则开 gate</td></tr>
+      <tr><td>run succeeded</td><td>末阶段</td><td><code>status = done</code></td></tr>
+      <tr><td>run failed</td><td><code>counts=true</code>，未超限</td><td><code>stage_attempts[stage] += 1</code>，<code>current_stage = back_to</code>，标下游 stale</td></tr>
+      <tr><td>run failed</td><td><code>counts=true</code>，已超限</td><td><code>status = blocked</code></td></tr>
+      <tr><td>run failed</td><td><code>counts=false</code>（env）</td><td><code>current_stage</code> 不变，新建同 stage 的 run（attempt+1）</td></tr>
+      <tr><td>gate approved</td><td>非末阶段</td><td><code>current_stage = next</code>，清 <code>awaiting_gate</code></td></tr>
+      <tr><td>gate rejected</td><td>带 <code>back_to</code></td><td><code>current_stage = back_to</code>，标下游 stale，清 <code>awaiting_gate</code></td></tr>
+      <tr><td>gate rejected</td><td>未带 <code>back_to</code></td><td>拒绝请求，400</td></tr>
+      <tr><td>任意推进</td><td>存在活跃 run</td><td>拒绝派发，等待现有 run 结束</td></tr>
+      <tr><td>任意派发</td><td>stage 写了 <code>assignee</code></td><td>跳过路由，直接用该 actor</td></tr>
+      <tr><td>任意派发</td><td>路由有候选</td><td>按排序选一个，trace 存进 <code>run.route</code>，建 run</td></tr>
+      <tr><td>任意派发</td><td>路由无候选</td><td><strong>不建 run</strong>，写 <code>route_pending</code>，issue 保持 <code>active</code></td></tr>
+      <tr><td>daemon 上线</td><td>存在「有 stage 无 run」的 issue</td><td>逐个补派；仍无候选则继续等</td></tr>
+    </tbody>
+  </table>
+
+  <h3>11.1 目录结构</h3>
+<pre><code>issueagent/
+├── schema.sql
+├── store.py          # 连接、PRAGMA、write_tx、查询
+├── workflow.py       # 加载、校验、快照入库
+├── driver.py         # stage_driver
+├── router.py         # 多 agent 路由
+├── sse.py            # 广播与 SSE handler
+├── api/
+│   ├── issues.py
+│   └── runs.py
+├── daemon.py
+├── templates/
+└── main.py
+
+data/app.db
+artifacts/{issue}/{stage}/v{n}/
+workflows/testcase_v1.yaml</code></pre>
+</section>
+
+<section>
+  <h2>12 · 范围边界</h2>
+  <h3>做什么</h3>
+  <p>issue 与工作流管理（<strong>workflow 可选</strong>：有编排走多阶段与回退，无编排就是单步或纯人工）、<strong>多 agent 路由</strong>（stage 声明能力，派发时按能力 / 在线 / 负载 / 熔断选 agent，决策落库）、三类阶段（gate / agent / job）、失败分类与回退、产物版本与失效传播、实时进度、预算闸门、完整审计流。</p>
+  <h3>不做什么，以及为什么</h3>
+  <table>
+    <thead><tr><th style="width:26%">不做</th><th>原因</th></tr></thead>
+    <tbody>
+      <tr><td>多实例 / 读写分离</td><td>SQLite 单文件，多实例就要换 Postgres。而进程内广播、<code>BEGIN IMMEDIATE</code> 排队两个前提会一起失效，等于换一套架构</td></tr>
+      <tr><td>技能库 / 向量检索 / 语义匹配</td><td>路由用精确的 <code>requires</code> 标签：能被解释、能离线重放。语义匹配每次都得出不同答案，也回答不了「为什么不选另一个」；重复任务靠 workflow 模板解决，不靠检索</td></tr>
+      <tr><td>多项目 / 多租户</td><td>一个团队一个仓库。加项目维度会让每条查询都带 <code>project_id</code>，收益不成正比</td></tr>
+      <tr><td>组织 / squad 层级</td><td>2–5 人不需要层级。<code>actor</code> 表里加个 <code>kind</code> 就能区分人和 agent</td></tr>
+      <tr><td>agent 之间自主委派</td><td>下一个 stage 由 workflow 决定，不由 agent 决定。让 agent 自己挑下一个 agent，等于让流程不可审计 —— 出了事没人能说清它当时以为自己该做什么</td></tr>
+      <tr><td>优先级 / 抢占 / 竞价调度</td><td>2–5 人团队只有十几个 agent，排队几秒就轮到了。抢占带来的复杂度和它省下的时间不成正比</td></tr>
+      <tr><td>成本看板</td><td>数字记在 <code>run</code> 表里，需要时写条 SQL 查。先不做图</td></tr>
+      <tr><td>IM 通知</td><td>inbox 页够看。真需要时加一个 webhook，是半天的事</td></tr>
+      <tr><td>可视化工作流编辑器</td><td>YAML 手写 + 启动校验报错，比拖拽编辑器更快定位问题</td></tr>
+      <tr><td>微服务拆分</td><td>单进程能扛住 2–5 人的负载，拆分只会让调试变难</td></tr>
+    </tbody>
+  </table>
+  <p>这些边界不是「以后再做」，而是<strong>当前规模下不该做</strong>。约束比选项更能保证项目跑得动。</p>
+</section>
+
+</div>
+</body>
+</html>
