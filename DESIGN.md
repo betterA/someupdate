@@ -593,7 +593,13 @@ def dispatch(issue, stage):
 
 issue 停在 `active`，`current_stage` 指向那个 stage，但没有活跃 run，写一条
 `event(type='route_pending')`。看板上这张卡显示「等待 agent」，不是「失败」。
-daemon 上线后补派。
+
+恢复要两个入口，缺一不可：**daemon 上线 / 重连**（agent 本来就不在）与
+**任意 run 结束**（agent 一直在，只是并发满了）。只做第一个会漏掉 `busy` ——
+并发是被 run 结束释放的，不在这里重扫，那张单子要等某个 daemon 重启才会动。
+
+重扫仍无候选就再写一条 `route_pending`，不去重：event 是事实流，
+「又试了一次还是没人接」正是看板要的信息 —— 这张卡是刚卡的，还是卡了两小时。
 
 「待派发」不需要新字段，它是派生的：`status='active'` + `current_stage` 非空
 + `awaiting_gate` 为空 + 无活跃 run。
@@ -602,9 +608,12 @@ gate 阶段同样没有 run，不排除它，一张正在等人审的单子就�
 daemon 每次重连都补派一遍，而那里根本没有要派的活。
 
 ```python
-def on_runtime_online(runtime_id):
+def retry_pending():
     for issue in pending_dispatch():        # 走 idx_issue_board
         dispatch(issue, issue.current_stage)
+
+def on_runtime_online(runtime_id):
+    retry_pending()                         # agent 回来了
 ```
 
 把「没人接」和「接了之后失败」分成两种状态，因为前者会自愈、后者不会。
@@ -883,13 +892,17 @@ def on_issue_created(issue):
 def on_run_finished(run):
     issue = load_issue(run.issue_id)
 
-    if issue.workflow_id is None:              # 无编排
+    if issue.workflow_id is None:               # 无编排
         if run.status == 'succeeded':
-            return set_status(issue, 'done')   # 没有 next 可推
-        return retry_or_block(issue, run)      # 没有 back_to 可退
+            result = set_status(issue, 'done')  # 没有 next 可推
+        else:
+            result = retry_or_block(issue, run) # 没有 back_to 可退
+    else:
+        spec = load_snapshot(issue.workflow_id, issue.workflow_version)
+        result = advance_or_revert(issue, run, spec)  # 有编排
 
-    spec = load_snapshot(issue.workflow_id, issue.workflow_version)
-    return advance_or_revert(issue, run, spec) # 有编排
+    retry_pending()    # 并发是被这次结束释放的，回头补派等着的那几张
+    return result
 ```
 
 `retry_or_block` 的逻辑：`env` 类原地重试且不计次，其余计入 `stage_attempts`，
@@ -1129,6 +1142,7 @@ sqlite3 data/app.db "VACUUM INTO 'backup/app-$(date +%F).db'"
 | 任意派发 | 路由有候选 | 按排序选一个，trace 存进 `run.route`，建 run |
 | 任意派发 | 路由无候选 | **不建 run**，写 `route_pending`，issue 保持 `active` |
 | daemon 上线 | 存在「有 stage 无 run」的 issue | 逐个补派；仍无候选则继续等 |
+| 任意 run 结束 | 存在 `route_pending` 的 issue | `retry_pending()` 重扫；仍无候选再写一条，不静默丢 |
 
 gate rejected 不计 `stage_attempts`：那个计数记的是「机器在这个 stage 上失败了几次」，
 人的打回不是机器失败。反复打回的代价是 token，由 `max_runs` 与预算兜住。

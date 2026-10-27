@@ -509,7 +509,9 @@ SELECT id FROM issue
 |---|
 | 11 |
 
-命中 issue 11，不命中 issue 10（它已 done）。daemon 上线后跑一次这个查询，逐个补派。
+命中 issue 11，不命中 issue 10（它已 done）。这条查询要跑在两个时机：**daemon 上线 / 重连**，
+以及**任意 run 结束**。后者不能省 —— 并发是被 run 结束释放的，只在上线时扫，那些「等 agent
+空出来」的单子要等到下次重启才会动，可能是几天。
 
 `awaiting_gate IS NULL` 这一条不能省：S1–S2 那段人审期间，issue 10 的前三个条件全部成立
 （`run` 表是空的），只有它能把「在等人」和「在等机器」分开。少了它，daemon 每次重连都会

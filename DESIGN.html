@@ -453,7 +453,7 @@ max_stage_attempts: 3</code></pre>
   <div class="fig">
     <svg viewBox="0 0 680 360" role="img" xmlns="http://www.w3.org/2000/svg" style="font-family:inherit">
       <title>多 agent 路由的完整判定路径</title>
-      <desc>stage 声明 requires 后，四个候选 agent 按能力、在线、负载过滤，两个存活，按亲和排序选中 agent-script；若无候选则不建 run，停在 route_pending 等 daemon 上线。</desc>
+      <desc>stage 声明 requires 后，四个候选 agent 按能力、在线、负载过滤，两个存活，按亲和排序选中 agent-script；若无候选则不建 run，停在 route_pending 等 agent 空出来。</desc>
       <defs>
         <marker id="a4" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
           <path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
@@ -506,9 +506,9 @@ max_stage_attempts: 3</code></pre>
 
       <rect x="370" y="294" width="250" height="48" rx="8" fill="#FFFFFF" stroke="#888780" stroke-width="0.5" stroke-dasharray="3 3"/>
       <text x="495" y="312" text-anchor="middle" dominant-baseline="central" font-size="12" font-weight="500" fill="#5F5E5A">route_pending</text>
-      <text x="495" y="330" text-anchor="middle" dominant-baseline="central" font-size="11" fill="#888780">不建 run · 等 daemon 上线</text>
+      <text x="495" y="330" text-anchor="middle" dominant-baseline="central" font-size="11" fill="#888780">不建 run · 等 agent 空出来</text>
     </svg>
-    <div class="cap">图 4 · 能力 → 在线 → 负载 → 排序；无候选停在 route_pending，不判失败</div>
+    <div class="cap">图 4 · 能力 → 在线 → 负载 → 排序；无候选停在 route_pending，不判失败，空出并发后重扫</div>
   </div>
 
   <p>派发只是 <code>stage_driver</code> 里的一个函数，不是独立服务：</p>
@@ -545,12 +545,17 @@ max_stage_attempts: 3</code></pre>
 
   <h4>三、无候选时不建 run</h4>
   <p>这是本节最重要的一条：<strong>路由失败不能落成 run 失败。</strong></p>
-  <p>issue 停在 <code>active</code>，<code>current_stage</code> 指向那个 stage，但没有活跃 run，写一条 <code>event(type='route_pending')</code>。看板上这张卡显示「等待 agent」，不是「失败」。daemon 上线后补派。</p>
+  <p>issue 停在 <code>active</code>，<code>current_stage</code> 指向那个 stage，但没有活跃 run，写一条 <code>event(type='route_pending')</code>。看板上这张卡显示「等待 agent」，不是「失败」。</p>
+  <p>恢复要两个入口，缺一不可：<strong>daemon 上线 / 重连</strong>（agent 本来就不在）与 <strong>任意 run 结束</strong>（agent 一直在，只是并发满了）。只做第一个会漏掉 <code>busy</code> —— 并发是被 run 结束释放的，不在这里重扫，那张单子要等某个 daemon 重启才会动。</p>
+  <p>重扫仍无候选就再写一条 <code>route_pending</code>，不去重：event 是事实流，「又试了一次还是没人接」正是看板要的信息 —— 这张卡是刚卡的，还是卡了两小时。</p>
   <p>「待派发」不需要新字段，它是派生的：<code>status='active'</code> + <code>current_stage</code> 非空 + <code>awaiting_gate</code> 为空 + 无活跃 run。</p>
   <p>gate 阶段同样没有 run，不排除它，一张正在等人审的单子就会被当成待派发 —— daemon 每次重连都补派一遍，而那里根本没有要派的活。</p>
-<pre><code>def on_runtime_online(runtime_id):
+<pre><code>def retry_pending():
     for issue in pending_dispatch():        # 走 idx_issue_board
-        dispatch(issue, issue.current_stage)</code></pre>
+        dispatch(issue, issue.current_stage)
+
+def on_runtime_online(runtime_id):
+    retry_pending()                         # agent 回来了</code></pre>
   <p>把「没人接」和「接了之后失败」分成两种状态，因为前者会自愈、后者不会。混成一个 <code>failed</code>，运维看到的就是一堆假失败。</p>
 
   <h4>四、决策必须落库</h4>
@@ -739,13 +744,17 @@ def on_issue_created(issue):
 <pre><code>def on_run_finished(run):
     issue = load_issue(run.issue_id)
 
-    if issue.workflow_id is None:              # 无编排
+    if issue.workflow_id is None:               # 无编排
         if run.status == 'succeeded':
-            return set_status(issue, 'done')   # 没有 next 可推
-        return retry_or_block(issue, run)      # 没有 back_to 可退
+            result = set_status(issue, 'done')  # 没有 next 可推
+        else:
+            result = retry_or_block(issue, run) # 没有 back_to 可退
+    else:
+        spec = load_snapshot(issue.workflow_id, issue.workflow_version)
+        result = advance_or_revert(issue, run, spec)  # 有编排
 
-    spec = load_snapshot(issue.workflow_id, issue.workflow_version)
-    return advance_or_revert(issue, run, spec) # 有编排</code></pre>
+    retry_pending()    # 并发是被这次结束释放的，回头补派等着的那几张
+    return result</code></pre>
   <p><code>retry_or_block</code> 的逻辑：<code>env</code> 类原地重试且不计次，其余计入 <code>stage_attempts</code>，累计超过 <code>max_stage_attempts</code> 则 <code>blocked</code>。它和编排路径的 <code>env</code> 分支共用同一份实现 —— <strong>唯一的区别是无编排没有回退边，只能原地重试。</strong></p>
   <p><code>advance_or_revert</code> 是编排路径，也是唯一会写 <code>current_stage</code> 的地方。两个分支都不会让 <code>current_stage</code> 从 NULL 变成非空，也不会反过来 —— 形态在 issue 创建时定死。</p>
 </section>
@@ -892,7 +901,7 @@ def on_issue_created(issue):
       <tr><td>4</td><td>router</td><td>候选过滤 / 确定性排序 / trace 落库</td></tr>
       <tr><td>5</td><td>issue API</td><td>CRUD、gate 动作、inbox 查询</td></tr>
       <tr><td>6</td><td>run API</td><td>claim / heartbeat / events / complete / block</td></tr>
-      <tr><td>7</td><td>事件流</td><td>SSE handler、进程内广播、游标补齐、daemon 上线补派</td></tr>
+      <tr><td>7</td><td>事件流</td><td>SSE handler、进程内广播、游标补齐、<code>retry_pending</code></td></tr>
       <tr><td>8</td><td>daemon</td><td>SSE 订阅、CAS 认领、子进程执行、批量上报、心跳</td></tr>
       <tr><td>9</td><td>看板页</td><td>列 = stage，卡片 = issue，详情页嵌事件流</td></tr>
     </tbody>
@@ -919,6 +928,7 @@ def on_issue_created(issue):
       <tr><td>任意派发</td><td>路由有候选</td><td>按排序选一个，trace 存进 <code>run.route</code>，建 run</td></tr>
       <tr><td>任意派发</td><td>路由无候选</td><td><strong>不建 run</strong>，写 <code>route_pending</code>，issue 保持 <code>active</code></td></tr>
       <tr><td>daemon 上线</td><td>存在「有 stage 无 run」的 issue</td><td>逐个补派；仍无候选则继续等</td></tr>
+      <tr><td>任意 run 结束</td><td>存在 <code>route_pending</code> 的 issue</td><td><code>retry_pending()</code> 重扫；仍无候选再写一条，不静默丢</td></tr>
     </tbody>
   </table>
 
