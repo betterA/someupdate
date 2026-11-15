@@ -1,0 +1,1381 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Notes × Agent · Demo</title>
+<!--
+  Notes × Agent · 可交互 Demo（单文件，无依赖，直接双击打开即可）
+  ------------------------------------------------------------------
+  这是前端原型：笔记、委派、状态、写回都是真的，只有 Agent 进程是本地模拟。
+  浏览器无法 spawn CLI，所以 AgentAdapter.start() 用 setTimeout 模拟流式事件。
+
+  接真 CLI 时只需替换 AgentAdapter.start() 一处：
+    POST /api/run           { agent, prompt, scope, permission }
+    EventSource /api/events/:runId   -> 收到 delta / tool / need_ok / done / error
+    POST /api/run/:id/stop
+  服务端按设计稿 05 节实现：
+    opencode run --format json --dir <vault> "<prompt>"     (NDJSON 逐行)
+    dsh --profile headless "<prompt>"                        (文本流 + 退出码)
+  其余 UI / 状态机 / 写回器逻辑无需改动。
+-->
+<style>
+:root{
+  --bg:#f6f7f9;--surface:#fff;--surface-2:#fafbfc;--line:#e5e8ed;--line-2:#eef0f3;
+  --ink:#1b1f26;--ink-2:#505866;--ink-3:#8b93a1;--ink-4:#aeb5c0;
+  --accent:#4f46e5;--accent-soft:#eef0ff;
+  --oc:#ea6c1f;--oc-soft:#fff3e9;--dsh:#6d5ce7;--dsh-soft:#f0edff;
+  --blue:#2563eb;--blue-soft:#eaf1ff;--green:#159447;--green-soft:#e9f7ef;
+  --amber:#c07a06;--amber-soft:#fff5e2;--red:#d33b3b;--red-soft:#fdeeee;
+  --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  --sans:-apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",Inter,system-ui,sans-serif;
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:13px;-webkit-font-smoothing:antialiased;overflow:hidden}
+button,input,select,textarea{font-family:inherit}
+button{cursor:pointer}
+::-webkit-scrollbar{width:8px;height:8px}
+::-webkit-scrollbar-thumb{background:#d6dbe3;border-radius:6px}
+::-webkit-scrollbar-track{background:transparent}
+
+.shell{height:100vh;display:flex;flex-direction:column}
+.topbar{height:44px;flex:none;background:var(--surface);border-bottom:1px solid var(--line);display:flex;align-items:center;gap:12px;padding:0 16px}
+.brand{display:flex;align-items:center;gap:8px;font-weight:650;font-size:13.5px}
+.brand .logo{width:20px;height:20px;border-radius:6px;background:var(--accent);color:#fff;display:grid;place-items:center;font-size:11px;font-weight:700}
+.demo-tag{font-family:var(--mono);font-size:10px;letter-spacing:.08em;color:#8a6a12;background:#fff6dc;border:1px solid #f0e0ac;border-radius:5px;padding:2px 7px}
+.hint{font-size:11.5px;color:var(--ink-3);margin-left:8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.hint b{color:var(--accent);font-weight:600}
+.top-right{margin-left:auto;display:flex;align-items:center;gap:8px;flex:none}
+.tbtn{border:1px solid var(--line);background:#fff;color:var(--ink-2);border-radius:6px;padding:4px 10px;font-size:11.5px}
+.tbtn:hover{border-color:#c9cfda;color:var(--ink)}
+.tbtn.pri{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+
+.app{display:grid;grid-template-columns:212px minmax(0,1fr) 312px;flex:1;min-height:0}
+
+/* ---------- rail ---------- */
+.rail{background:var(--surface-2);border-right:1px solid var(--line);display:flex;flex-direction:column;min-width:0}
+.rail-top{padding:12px;border-bottom:1px solid var(--line-2)}
+.newbtn{width:100%;border:1px solid #d9dde5;background:#fff;border-radius:6px;padding:7px 10px;font-size:12px;color:var(--ink-2);display:flex;justify-content:space-between;align-items:center}
+.newbtn:hover{border-color:var(--accent);color:var(--accent)}
+.newbtn span:last-child{font-family:var(--mono);font-size:10px;color:var(--ink-4)}
+.searchwrap{margin-top:8px;position:relative}
+.searchwrap input{width:100%;border:1px solid var(--line);background:#fff;border-radius:6px;padding:6px 9px 6px 24px;font-size:11.5px;outline:none;color:var(--ink)}
+.searchwrap input:focus{border-color:#b9bdf5;box-shadow:0 0 0 2px var(--accent-soft)}
+.searchwrap:before{content:"⌕";position:absolute;left:8px;top:5px;color:var(--ink-4);font-size:13px}
+.rail-list{flex:1;overflow:auto;padding:10px 8px}
+.group{font-family:var(--mono);font-size:10px;color:var(--ink-4);letter-spacing:.08em;padding:0 7px;margin:2px 0 8px}
+/* ---------- 目录 ---------- */
+.rail-actions{display:flex;gap:6px;align-items:center;margin-top:8px}
+.rail-actions .searchwrap{flex:1;min-width:0;margin-top:0}
+.folder-btn{flex:none;border:1px solid #d9dde5;background:#fff;border-radius:6px;padding:6px 7px;font-size:10.5px;color:var(--ink-2);white-space:nowrap}
+.folder-btn:hover{border-color:var(--accent);color:var(--accent)}
+.fgroup{margin-bottom:10px;border-radius:7px;transition:background .12s}
+.fgroup.dragover{background:#e9ecff;outline:1px dashed var(--accent)}
+.folder{display:flex;align-items:center;gap:6px;font-size:11.5px;font-weight:640;color:var(--ink-2);padding:5px 7px;border-radius:5px;cursor:pointer;user-select:none}
+.folder:hover{background:#eef1f5}
+.folder .caret{font-size:9px;color:var(--ink-4);width:9px;flex:none}
+.folder .fname{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.folder .cnt{font-family:var(--mono);font-size:9.5px;color:var(--ink-4);flex:none}
+.folder .fmore{opacity:0;border:0;background:transparent;color:var(--ink-3);font-size:13px;padding:0 2px;line-height:1;flex:none}
+.fgroup:hover .fmore,.folder .fmore:focus{opacity:1}
+.fgroup.collapsed .note,.fgroup.collapsed .empty-folder{display:none}
+.fgroup .note{padding-left:19px}
+.folder-input{width:100%;border:1px solid #b9bdf5;border-radius:5px;padding:4px 7px;font-size:11.5px;outline:none;color:var(--ink);background:#fff;box-shadow:0 0 0 2px var(--accent-soft)}
+.empty-folder{padding:3px 7px 3px 19px;font-size:10.5px;color:var(--ink-4)}
+.note[draggable="true"]{cursor:grab}
+.note.dragging{opacity:.4}
+.note{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--ink-2);padding:7px 9px;border-radius:6px;margin-bottom:2px;cursor:pointer;white-space:nowrap;overflow:hidden}
+.note:hover{background:#eef1f5}
+.note.sel{background:var(--accent-soft);color:#3730b8;font-weight:600}
+.note .dot{width:5px;height:5px;border-radius:50%;background:#c9cfd9;flex:none}
+.note.sel .dot{background:var(--accent)}
+.note .txt{overflow:hidden;text-overflow:ellipsis}
+.note .badge{margin-left:auto;font-family:var(--mono);font-size:9px;color:#fff;background:var(--blue);border-radius:8px;padding:1px 5px;flex:none}
+.note .badge.done{background:var(--green)}
+.empty{padding:16px 10px;font-size:11.5px;color:var(--ink-4);text-align:center}
+.rail-foot{border-top:1px solid var(--line-2);padding:9px 13px;font-size:10.5px;color:var(--ink-3);display:flex;justify-content:space-between}
+
+/* ---------- editor ---------- */
+.editor{display:flex;flex-direction:column;min-width:0;background:#fff}
+.ed-head{padding:12px 20px 0;border-bottom:1px solid var(--line-2);flex:none}
+.ed-title{font-size:16px;font-weight:640;letter-spacing:-.01em;display:flex;align-items:center;gap:10px}
+.ed-title .more{margin-left:auto;border:1px solid var(--line);background:#fff;border-radius:6px;padding:2px 9px;font-size:12px;color:var(--ink-3);line-height:1.4}
+.ed-sub{font-family:var(--mono);font-size:10.5px;color:var(--ink-3);margin-top:3px}
+.ed-tabs{display:flex;gap:16px;margin-top:10px;font-size:11.5px;color:var(--ink-3)}
+.ed-tabs span{padding-bottom:7px;cursor:pointer;border-bottom:2px solid transparent}
+.ed-tabs span.on{color:var(--ink);font-weight:600;border-bottom-color:var(--accent)}
+
+.ed-body{position:relative;flex:1;min-height:0;background:#fff}
+.ta{position:absolute;inset:0;width:100%;height:100%;resize:none;border:0;outline:0;background:transparent;color:#313a47;
+    font-family:var(--mono);font-size:12.5px;line-height:26px;letter-spacing:0;tab-size:2;
+    padding:14px 160px 24px 52px;white-space:pre;overflow:auto;z-index:2;caret-color:var(--accent)}
+.ta::selection{background:#d9ddff}
+.aibg{position:absolute;inset:0;overflow:hidden;z-index:1;pointer-events:none}
+.aibginner{position:relative;will-change:transform}
+.airow{position:absolute;left:52px;right:120px;height:26px;background:var(--green-soft);opacity:.62;border-left:2px solid #b6e2c8}
+.gutter{position:absolute;left:0;top:0;bottom:0;width:52px;overflow:hidden;z-index:3;pointer-events:none;background:#fff}
+.ginner{padding-top:14px;will-change:transform}
+.gline{height:26px;line-height:26px;text-align:right;padding-right:14px;font-family:var(--mono);font-size:11px;color:#c2c9d3}
+.decor{position:absolute;right:0;top:0;bottom:0;width:160px;overflow:hidden;z-index:4;pointer-events:none}
+.dinner{position:relative;will-change:transform}
+.drow{position:absolute;right:12px;height:26px;display:flex;align-items:center;justify-content:flex-end;gap:6px}
+.drow *{pointer-events:auto}
+.pill{display:inline-flex;align-items:center;gap:5px;font-family:var(--sans);font-size:10.5px;font-weight:600;border-radius:20px;padding:2px 9px;white-space:nowrap;border:0}
+.pill .tick{width:6px;height:6px;border-radius:50%;background:currentColor}
+.pill.run{background:var(--blue-soft);color:var(--blue)}
+.pill.run .tick{animation:pulse 1.3s infinite}
+.pill.done{background:var(--green-soft);color:var(--green)}
+.pill.queue{background:#f0f2f5;color:#7d8694}
+.pill.fail,.pill.stop{background:#f1f3f6;color:#7d8694}
+.pill.wait{background:var(--amber-soft);color:var(--amber)}
+@keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.3;transform:scale(.65)}}
+.dele{font-size:10.5px;font-weight:600;border:1px solid #cfd2fb;background:var(--accent-soft);color:#4338ca;border-radius:5px;padding:2px 9px;white-space:nowrap}
+.dele:hover{background:#e2e5ff}
+.mini{font-size:10px;border:1px solid var(--line);background:#fff;color:var(--ink-3);border-radius:4px;padding:1px 6px}
+.mini:hover{color:var(--accent);border-color:#cfd2fb}
+
+.preview{position:absolute;inset:0;overflow:auto;padding:20px 30px;font-size:13.5px;line-height:1.85;color:var(--ink-2);z-index:5;background:#fff;display:none}
+.preview h1{font-size:22px;color:var(--ink);margin:0 0 16px}
+.preview h2{font-size:16px;color:var(--ink);margin:26px 0 10px;padding-bottom:6px;border-bottom:1px solid var(--line-2)}
+.preview p{margin:0 0 8px}
+.preview li{margin:3px 0}
+.preview code{font-family:var(--mono);font-size:12px;background:#f1f3f6;border:1px solid #e7eaee;border-radius:4px;padding:1px 5px}
+.preview .ai{margin:6px 0 10px 22px;padding:7px 14px;background:var(--green-soft);border-left:2px solid #b6e2c8;border-radius:0 5px 5px 0;color:var(--ink-2);font-size:12.5px;line-height:1.75}
+.preview .ai div{margin:2px 0}
+.preview .ai div:first-child{color:var(--green);font-weight:650}
+.ed-foot{flex:none;border-top:1px solid var(--line-2);padding:7px 16px;display:flex;gap:16px;font-size:10.5px;color:var(--ink-3);background:#fcfcfd;align-items:center}
+.ed-foot kbd{font-family:var(--mono);border:1px solid #dfe3e9;background:#fff;border-radius:4px;padding:1px 5px;color:var(--ink-2)}
+.ed-foot .saved{margin-left:auto}
+
+/* ---------- deck ---------- */
+.deck{background:var(--surface-2);border-left:1px solid var(--line);display:flex;flex-direction:column;min-width:0}
+.deck-head{flex:none;padding:12px 14px 10px;border-bottom:1px solid var(--line-2);display:flex;align-items:center;gap:8px}
+.deck-head .ttl{font-family:var(--mono);font-size:10.5px;letter-spacing:.09em;color:var(--ink-3)}
+.deck-head .online{margin-left:auto;font-size:10px;color:var(--green);background:var(--green-soft);border-radius:10px;padding:1px 7px}
+.deck-body{flex:1;overflow:auto;padding:12px}
+.acard{border:1px solid var(--line);background:#fff;border-radius:8px;padding:11px 12px;margin-bottom:9px;box-shadow:0 1px 2px rgba(20,25,35,.03);transition:.2s}
+.acard.busy{border-color:#cddcf7}
+.acard.waiting{border-color:#f0d9a8}
+.acard-h{display:flex;align-items:center;gap:7px;margin-bottom:8px}
+.avatar{width:19px;height:19px;border-radius:5px;display:grid;place-items:center;font-size:10px;font-weight:700;color:#fff;flex:none}
+.avatar.oc{background:var(--oc)}.avatar.dsh{background:var(--dsh)}
+.acard-h .nm{font-size:12px;font-weight:640}
+.acard-h .st{margin-left:auto;font-size:10px;font-weight:600}
+.st.run{color:var(--blue)}.st.idle{color:var(--ink-3)}.st.done{color:var(--green)}.st.wait{color:var(--amber)}.st.stop{color:var(--ink-3)}.st.queue{color:var(--ink-3)}
+.taskline{font-size:11.5px;color:var(--ink-2);line-height:1.5;margin-bottom:7px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.prog{height:3px;border-radius:3px;background:#eceff3;overflow:hidden;margin-bottom:8px}
+.prog i{display:block;height:100%;width:35%;background:var(--blue);border-radius:3px;transition:width .5s linear}
+.needok{background:var(--amber-soft);border:1px solid #f0dfba;border-radius:6px;padding:8px 9px;font-size:11px;color:#8a6212;margin-bottom:8px;line-height:1.5}
+.needok .acts{margin-top:6px;display:flex;gap:6px}
+.stream{font-family:var(--mono);font-size:10px;color:#76808e;background:#f7f8fa;border:1px solid var(--line-2);border-radius:6px;padding:7px 9px;line-height:1.65;max-height:132px;overflow:auto;margin-bottom:8px;white-space:pre-wrap;word-break:break-word}
+.stream:empty{display:none}
+.stream .t{color:#9aa3b0}
+.stream .d{color:#3a424f}
+.stream .ok{color:var(--green)}
+.stream .er{color:var(--red)}
+.acts{display:flex;gap:6px;flex-wrap:wrap}
+.acts span{font-size:10.5px;color:var(--ink-2);border:1px solid var(--line);border-radius:5px;padding:2px 8px;background:#fff;cursor:pointer;user-select:none}
+.acts span:hover{border-color:#c9cfda;color:var(--ink)}
+.acts span.red{color:var(--red);border-color:#f3d7d7}
+.acts span.pri{background:var(--accent-soft);border-color:#cfd2fb;color:#4338ca;font-weight:600}
+.deck-sub{margin:16px 0 7px;font-family:var(--mono);font-size:10px;letter-spacing:.08em;color:var(--ink-3)}
+.runrow{display:flex;gap:8px;align-items:center;font-size:11px;color:var(--ink-2);padding:6px 3px;border-bottom:1px solid var(--line-2);cursor:pointer}
+.runrow:hover{background:#f0f2f6}
+.runrow .who{font-family:var(--mono);font-size:9.5px;border-radius:4px;padding:1px 5px;flex:none}
+.runrow .who.oc{color:var(--oc);background:var(--oc-soft)}
+.runrow .who.dsh{color:var(--dsh);background:var(--dsh-soft)}
+.runrow .txt{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.runrow .t{margin-left:auto;font-family:var(--mono);font-size:9.5px;color:var(--ink-4);flex:none}
+.deck-foot{flex:none;border-top:1px solid var(--line-2);padding:8px 13px;font-size:10.5px;color:var(--ink-3);display:flex;justify-content:space-between}
+
+/* ---------- overlays ---------- */
+.mask{position:fixed;inset:0;background:rgba(20,26,38,.18);z-index:20;display:none}
+.mask.on{display:block}
+.pop{position:fixed;z-index:30;width:336px;background:#fff;border:1px solid #dfe3e9;border-radius:10px;box-shadow:0 18px 46px rgba(24,32,48,.2);display:none;overflow:hidden}
+.pop.on{display:block}
+.pop-h{padding:11px 14px;border-bottom:1px solid var(--line-2);font-size:12px;font-weight:640;display:flex;align-items:center}
+.pop-h .esc{margin-left:auto;font-family:var(--mono);font-size:10px;color:var(--ink-4);font-weight:400}
+.opt{display:flex;align-items:center;gap:9px;padding:9px 14px;font-size:12.5px;border-bottom:1px solid var(--line-2);cursor:pointer}
+.opt:hover{background:#fafbff}
+.opt.sel{background:var(--accent-soft)}
+.opt .rd{width:12px;height:12px;border-radius:50%;border:1px solid #cbd1db;flex:none}
+.opt.sel .rd{border:4px solid var(--accent)}
+.opt .sub{margin-left:auto;font-size:10.5px;color:var(--ink-3)}
+.pop-ctx{padding:8px 14px;font-size:11.5px;color:var(--ink-2);display:flex;gap:8px;align-items:center;border-bottom:1px solid var(--line-2)}
+.pop-ctx select{margin-left:auto;font-size:11px;border:1px solid var(--line);border-radius:5px;padding:3px 6px;color:var(--ink-2);background:#fff;outline:none}
+.pop-note{padding:8px 14px;background:#fafbfc;font-size:10.5px;color:var(--ink-3);line-height:1.5;word-break:break-all}
+.pop-note b{color:var(--ink-2);font-weight:600}
+.pop-f{padding:10px 14px;border-top:1px solid var(--line-2);display:flex;align-items:center;gap:8px;background:#fff}
+.pop-f .hint2{font-size:10.5px;color:var(--ink-4);margin-right:auto}
+
+.drawer{position:fixed;right:0;top:0;bottom:0;width:352px;background:#fff;border-left:1px solid var(--line);box-shadow:-14px 0 40px rgba(24,32,48,.1);z-index:31;transform:translateX(100%);transition:transform .22s ease;display:flex;flex-direction:column}
+.drawer.on{transform:translateX(0)}
+.dr-head{padding:18px 20px;border-bottom:1px solid var(--line-2);display:flex;align-items:center}
+.dr-head h3{margin:0;font-size:15px;font-weight:640}
+.dr-head .x{margin-left:auto;border:0;background:transparent;font-size:18px;color:var(--ink-3);line-height:1}
+.dr-body{padding:18px 20px;overflow:auto;flex:1}
+.field{margin-bottom:16px}
+.field label{display:block;font-size:11.5px;color:var(--ink-2);margin-bottom:6px;font-weight:600}
+.field .desc{font-size:10.5px;color:var(--ink-4);margin-top:5px;line-height:1.5}
+.field input,.field select{width:100%;border:1px solid var(--line);border-radius:6px;padding:7px 9px;font-size:12px;color:var(--ink);background:#fff;outline:none}
+.field input:focus,.field select:focus{border-color:#b9bdf5;box-shadow:0 0 0 2px var(--accent-soft)}
+.check{display:flex;align-items:center;gap:9px;font-size:12px;color:var(--ink-2)}
+.check input{width:15px;height:15px;accent-color:var(--accent)}
+.dr-foot{padding:14px 20px;border-top:1px solid var(--line-2);display:flex;gap:8px}
+.dr-foot .tbtn{flex:1;padding:7px}
+.note-box{background:#fafbfc;border:1px solid var(--line);border-radius:8px;padding:12px;font-size:11.5px;color:var(--ink-2);line-height:1.65}
+.note-box b{color:var(--ink)}
+
+.menu{position:fixed;z-index:32;background:#fff;border:1px solid var(--line);border-radius:8px;box-shadow:0 12px 30px rgba(24,32,48,.16);padding:5px;display:none;min-width:168px}
+.menu.on{display:block}
+.menu div{font-size:12px;color:var(--ink-2);padding:7px 10px;border-radius:5px;cursor:pointer}
+.menu div:hover{background:#f2f4f8;color:var(--ink)}
+.menu div.danger{color:var(--red)}
+.menu hr{border:0;border-top:1px solid var(--line-2);margin:4px 0}
+
+.toast{position:fixed;right:22px;bottom:22px;z-index:40;background:#1f2530;color:#fff;border-radius:8px;padding:10px 14px;font-size:12px;box-shadow:0 10px 30px rgba(20,26,38,.25);opacity:0;transform:translateY(8px);transition:.2s;pointer-events:none;max-width:340px}
+.toast.on{opacity:1;transform:translateY(0)}
+.toast.ok{background:#166b3a}
+.toast.warn{background:#9a6210}
+
+@media(max-width:1000px){
+  .app{grid-template-columns:170px minmax(0,1fr)}
+  .deck{grid-column:1/-1;border-left:0;border-top:1px solid var(--line);max-height:260px}
+  .hint{display:none}
+  .ta{padding-right:20px}
+  .decor{display:none}
+}
+</style>
+</head>
+<body>
+<div class="shell">
+
+  <div class="topbar">
+    <div class="brand"><span class="logo">N</span> notes × agent</div>
+    <span class="demo-tag">demo · 本地模拟 agent</span>
+    <span class="hint" id="hint">委派：光标放到 <b>- TODO</b> 行 → <b>↗ 委派</b>（dsh 要一次授权）→ 结论写回　｜　目录：<b>＋目录</b> 新建，拖笔记或右键移动；新建笔记默认进 <b>01_todo</b></span>
+    <div class="top-right">
+      <button class="tbtn" id="btnFold">收起甲板</button>
+      <button class="tbtn" id="btnSettings">设置</button>
+    </div>
+  </div>
+
+  <div class="app" id="app">
+    <!-- rail -->
+    <aside class="rail">
+      <div class="rail-top">
+        <button class="newbtn" id="btnNew"><span>＋ 新建笔记</span><span>⌘N</span></button>
+        <div class="rail-actions">
+          <div class="searchwrap"><input id="search" placeholder="搜索笔记…" autocomplete="off"></div>
+          <button class="folder-btn" id="btnNewFolder" title="新建目录（⌘⇧N）">＋目录</button>
+        </div>
+      </div>
+      <div class="rail-list" id="railList"></div>
+      <div class="rail-foot"><span id="vaultLabel">~/notes/vault</span><span id="noteCount">0 篇</span></div>
+    </aside>
+
+    <!-- editor -->
+    <main class="editor">
+      <div class="ed-head">
+        <div class="ed-title"><span id="edTitle">—</span><button class="more" id="btnMore">⋯</button></div>
+        <div class="ed-sub" id="edSub"></div>
+        <div class="ed-tabs"><span class="on" data-tab="edit">编辑</span><span data-tab="preview">预览</span></div>
+      </div>
+      <div class="ed-body" id="edBody">
+        <div class="aibg"><div class="aibginner" id="aibginner"></div></div>
+        <div class="gutter"><div class="ginner" id="gutter"></div></div>
+        <textarea class="ta" id="ta" spellcheck="false" wrap="off" autocomplete="off"></textarea>
+        <div class="decor" id="decor"><div class="dinner" id="dinner"></div></div>
+        <div class="preview" id="preview"></div>
+      </div>
+      <div class="ed-foot">
+        <span><kbd>⌘↵</kbd> 委派当前行</span><span><kbd>⌘K</kbd> 搜索</span><span><kbd>Esc</kbd> 关闭</span>
+        <span class="saved" id="saved">已保存到本地</span>
+      </div>
+    </main>
+
+    <!-- deck -->
+    <aside class="deck" id="deck">
+      <div class="deck-head"><span class="ttl">agents · 甲板</span><span class="online" id="online">2 个就绪</span></div>
+      <div class="deck-body" id="deckBody"></div>
+      <div class="deck-foot"><span id="concurrency">并发 0 / 2</span><span>opencode · dsh</span></div>
+    </aside>
+  </div>
+</div>
+
+<div class="mask" id="mask"></div>
+
+<!-- delegate popover -->
+<div class="pop" id="pop">
+  <div class="pop-h">派给哪个 agent<span class="esc">esc 取消</span></div>
+  <div class="opt sel" data-agent="opencode"><span class="rd"></span><span class="avatar oc">O</span><span>opencode</span><span class="sub">代码 / 仓库分析</span></div>
+  <div class="opt" data-agent="dsh"><span class="rd"></span><span class="avatar dsh">D</span><span>dsh</span><span class="sub">长任务 / 中文整理</span></div>
+  <div class="pop-ctx">上下文 <select id="scope"><option value="tree">本行 + 上级 + 子项</option><option value="line">仅本行</option><option value="all">整篇笔记</option></select></div>
+  <div class="pop-ctx">权限 <select id="perm"><option value="ro">只读分析（默认）</option><option value="rw">本次允许改文件</option></select></div>
+  <div class="pop-note" id="popNote"></div>
+  <div class="pop-f"><span class="hint2" id="popHint"></span><button class="tbtn" id="popCancel">取消</button><button class="tbtn pri" id="popSend">发送 ⌘↵</button></div>
+</div>
+
+<!-- settings drawer -->
+<div class="drawer" id="drawer">
+  <div class="dr-head"><h3>设置</h3><button class="x" id="drClose">×</button></div>
+  <div class="dr-body">
+    <div class="field"><label>笔记库路径</label><input id="cfgVault"><div class="desc">真实实现里由本地服务读写这个目录；demo 中数据存在浏览器 localStorage。</div></div>
+    <div class="field"><label>默认 agent</label><select id="cfgDefault"><option value="opencode">opencode</option><option value="dsh">dsh</option></select></div>
+    <div class="field"><label>opencode cli</label><input id="cfgOc"><div class="desc">opencode run --format json --dir &lt;vault&gt; "&lt;prompt&gt;"</div></div>
+    <div class="field"><label>dsh cli / profile</label><input id="cfgDsh"><div class="desc">dsh --profile headless "&lt;prompt&gt;"</div></div>
+    <div class="field"><label>权限</label><label class="check"><input type="checkbox" id="cfgWrite"> 默认允许 Agent 改文件</label><div class="desc">关掉时每次委派都要在浮层里单独授权。</div></div>
+    <div class="field"><label>超时（分钟）</label><input id="cfgTimeout" type="number" min="1" max="60"></div>
+    <div class="note-box"><b>这个 demo 里什么是真的：</b>笔记编辑 / 搜索 / 新建 / 删除、目录创建 / 重命名 / 删除、笔记移动（拖拽或右键菜单）、任务行委派、状态机、并发队列、流式输出、结论写回（含写前合并不覆盖手写内容）、本地持久化。<br><br><b>目录是单层分组</b>，命名统一为编号前缀 + 全小写：<code>01_todo</code> / <code>02_sop</code> / <code>03_skills</code> / <code>04_project</code>。新建目录会自动转小写、空格转下划线并补下一个编号；「＋ 新建笔记」默认落在 <code>01_todo</code>。每篇笔记只属于一个目录或「未归档」；删除目录不会删笔记。<br><br><b>什么是模拟的：</b>只有 Agent 进程本身。接真 CLI 时替换 <code>AgentAdapter.start()</code> 一处即可，见文件头注释。</div>
+  </div>
+  <div class="dr-foot"><button class="tbtn" id="drReset">重置演示数据</button><button class="tbtn pri" id="drSave">保存</button></div>
+</div>
+
+<div class="menu" id="menu"></div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+(function(){
+'use strict';
+
+/* ============================================================
+   1. 数据层：localStorage 持久化
+   ============================================================ */
+var KEY = 'notes-agent-demo-v1';
+
+/* 目录体系：编号前缀 + 全小写，任务笔记默认落在 01_todo */
+var PRESET_FOLDERS = [
+  { id:'f1', name:'01_todo' },
+  { id:'f2', name:'02_sop' },
+  { id:'f3', name:'03_skills' },
+  { id:'f4', name:'04_project' }
+];
+var PRESET_NOTE_FOLDER = { n1:'f1', n2:'f1', n3:'f3', n4:'f2', n5:'f4' };
+
+function seed(){
+  return {
+    schema: 2,
+    activeId: 'n1',
+    config: { vault:'~/notes/vault', defaultAgent:'opencode', ocBin:'opencode', dshBin:'dsh --profile headless', allowWrite:false, timeoutMin:10 },
+    folders: PRESET_FOLDERS.map(function(f){ return { id:f.id, name:f.name }; }),
+    notes: [
+      { id:'n1', folder:'f1', mtime: Date.now()-1000*60*3, text:
+        '# PLP 测试异常排查\n'+
+        '盘：12.8TB UE53112T8V967E0022 · 192.168.107.10\n'+
+        '\n'+
+        '## 今日待办\n'+
+        '- TODO 定位 TC-05.1 电源恢复异常 @opencode\n'+
+        '- TODO 整理 TC-05.5 信号分组与 timing @dsh\n'+
+        '  - Lane / REFCLK / SMBus 三组，每组随机抽 1 个信号\n'+
+        '  - 配合 power cycle + PRBS 注入\n'+
+        '- TODO 复核 TC-05.2 数据损坏必现参数\n'+
+        '\n'+
+        '## 备注\n'+
+        '- 交接只留用例集 + 原始 power.py\n'+
+        '- TC-05.5 每轮随机抽 1–2 组，各抽 1 个信号及随机 timing\n' },
+      { id:'n2', folder:'f1', mtime: Date.now()-1000*60*60*5, text:
+        '# 交接文档收窄\n'+
+        '\n'+
+        '- DONE 范围收敛为「测试用例集 + 原始 power.py」\n'+
+        '- TODO 移除重构产物与测试框架说明\n'+
+        '- TODO 补齐 27 个用例的执行入口\n'+
+        '\n'+
+        '## 备注\n'+
+        '- 格式修订严格 format-only，不动原文字词\n' },
+      { id:'n3', folder:'f3', mtime: Date.now()-1000*60*60*26, text:
+        '# Cola 交互规则\n'+
+        '\n'+
+        '- 首页只留「我的选择」，最多 5 条\n'+
+        '- temp 单槽；本地库上限 30 条，溢出进 temp\n'+
+        '- 底部居中「+」融合 temp 状态，有内容变红显示 +1\n'+
+        '\n'+
+        '## 待定\n'+
+        '- TODO 云端卡片操作栏与本地配置连接地址 @opencode\n' },
+      { id:'n4', folder:'f2', mtime: Date.now()-1000*60*60*50, text:
+        '# TC-05.5 信号分组\n'+
+        '\n'+
+        '- Lane：随机抽 1 个信号\n'+
+        '- REFCLK：随机抽 1 个信号\n'+
+        '- SMBus：随机抽 1 个信号\n'+
+        '\n'+
+        '每轮随机抽 1–2 组，配合 power cycle + PRBS 注入。\n' },
+      { id:'n5', folder:'f4', mtime: Date.now()-1000*60*60*24*6, text:
+        '# 周记 11/09\n'+
+        '\n'+
+        '- TC-05.1 电源恢复异常仍未定位\n'+
+        '- TC-05.4 修复链已验证\n'+
+        '- 下周目标：TC-05.2 建立 100 轮必现基准\n' }
+    ]
+  };
+}
+
+var S = load();
+var runs = [];        // 运行记录不持久化，刷新即清空
+var popAgent = 'opencode';
+var popLine = -1;
+var tab = 'edit';
+var deckFolded = false;
+var openStreamId = null;
+var tickTimer = null;
+var saveTimer = null;
+var collapsed = {};          // 目录折叠状态（仅本次会话，不落盘）
+var creatingFolder = false;  // 新建目录的内联输入
+var editingFolderId = null;  // 重命名目录的内联输入
+var dragNoteId = null;
+var menuItems = [];
+
+function load(){
+  try{
+    var raw = localStorage.getItem(KEY);
+    if(raw){ var o = JSON.parse(raw); if(o && o.notes && o.notes.length) return migrate(o); }
+  }catch(e){}
+  return seed();
+}
+/* 兼容旧版本数据：目录换成编号小写体系，用户自建目录保留 */
+function migrate(o){
+  // 残缺的早期数据补齐配置，避免启动时读 S.config.vault 报错
+  if(!o.config) o.config = {};
+  var def = seed().config, k;
+  for(k in def) if(o.config[k] === undefined) o.config[k] = def[k];
+  if(!o.activeId && o.notes.length) o.activeId = o.notes[0].id;
+  if(o.schema !== 2){
+    if(!o.folders) o.folders = [];
+    // 预设目录按 01→04 排在最前，用户自建目录保持原顺序跟在后面
+    var presetIds = {}, ordered = [];
+    PRESET_FOLDERS.forEach(function(f){ presetIds[f.id] = true; });
+    PRESET_FOLDERS.forEach(function(f){
+      var found = null;
+      for(var i=0;i<o.folders.length;i++) if(o.folders[i].id===f.id){ found=o.folders[i]; break; }
+      if(found){ found.name = f.name; ordered.push(found); }
+      else ordered.push({ id:f.id, name:f.name });
+    });
+    o.folders.forEach(function(f){ if(!presetIds[f.id]) ordered.push(f); });
+    o.folders = ordered;
+    o.notes.forEach(function(n){
+      if(PRESET_NOTE_FOLDER[n.id]) n.folder = PRESET_NOTE_FOLDER[n.id];
+      else if(n.folder === undefined) n.folder = '';
+    });
+    o.schema = 2;
+  }
+  o.notes.forEach(function(n){
+    if(n.folder && !o.folders.some(function(f){ return f.id===n.folder; })) n.folder = '';
+  });
+  return o;
+}
+function folderById(id){
+  for(var i=0;i<S.folders.length;i++) if(S.folders[i].id===id) return S.folders[i];
+  return null;
+}
+/* 编号目录按名字升序显示，01 → 02 → 03 → 04 → 自编编号 */
+function sortedFolders(){
+  return S.folders.slice().sort(function(a,b){ return a.name < b.name ? -1 : (a.name > b.name ? 1 : 0); });
+}
+function folderNameOf(id){
+  var f = folderById(id);
+  return f ? f.name : '未归档';
+}
+function noteById(id){
+  for(var i=0;i<S.notes.length;i++) if(S.notes[i].id===id) return S.notes[i];
+  return null;
+}
+function save(){
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(function(){
+    try{ localStorage.setItem(KEY, JSON.stringify(S)); }catch(e){}
+    var el = document.getElementById('saved');
+    el.textContent = '已保存 · ' + hhmmss(new Date());
+  }, 300);
+}
+function activeNote(){
+  for(var i=0;i<S.notes.length;i++) if(S.notes[i].id === S.activeId) return S.notes[i];
+  return S.notes[0];
+}
+function titleOf(text){
+  var first = (text.split('\n')[0]||'').trim();
+  if(/^#\s+/.test(first)) first = first.replace(/^#\s+/,'');
+  return first || '未命名笔记';
+}
+function esc(s){
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function pad(n){ return n<10 ? '0'+n : ''+n; }
+function hhmm(d){ return pad(d.getHours())+':'+pad(d.getMinutes()); }
+function hhmmss(d){ return hhmm(d)+':'+pad(d.getSeconds()); }
+function dur(ms){
+  var s = Math.max(0,Math.floor(ms/1000));
+  return pad(Math.floor(s/60))+':'+pad(s%60);
+}
+var $ = function(id){ return document.getElementById(id); };
+
+/* ============================================================
+   2. 模拟 Agent 适配层 —— 接真 CLI 时只替换这里
+   ============================================================ */
+var SCRIPTS = {
+  opencode: [
+    [350,'tool','$ read power.py'],
+    [650,'tool','$ grep -n "power_cycle" power.py'],
+    [750,'delta','看到 reset 在 power_cycle 之后立即下发，中间没有等待 PLP 电容放电。'],
+    [650,'tool','$ read quarch/power.py:212-268'],
+    [850,'delta','恢复窗口比规格短约 40ms，可以解释 TC-05.1 的电源恢复异常。'],
+    [500,'done','']
+  ],
+  dsh: [
+    [400,'delta','先拆任务：三组信号 × 随机抽样 × timing 对齐。'],
+    [600,'tool','$ scan TC-05.5 spec'],
+    [550,'need_ok','需要把整理结果写入 vault/TC-05.5.md，是否允许一次？'],
+    [750,'delta','按「组 → 信号 → timing」两级抽取，每轮随机 1–2 组。'],
+    [650,'tool','$ check power cycle + PRBS 对齐'],
+    [800,'delta','27 个用例可覆盖且抽样不重复；timing 取值范围仍需人工确认。'],
+    [450,'done','']
+  ]
+};
+var SUMMARIES = {
+  opencode: {
+    conclusion:'power_cycle 后未等待 PLP 电容放电完成即下发 reset，恢复窗口偏短约 40ms，可解释 TC-05.1 异常。',
+    changes:'无（只读分析）',
+    todo:'需真机复测 100 轮确认'
+  },
+  dsh: {
+    conclusion:'三组信号按「组 → 信号 → timing」两级随机抽取，每轮 1–2 组，与 power cycle 对齐后注入 PRBS，可覆盖 27 个用例。',
+    changes:'vault/TC-05.5.md（已授权）',
+    todo:'timing 取值范围需人工确认'
+  }
+};
+
+var AgentAdapter = {
+  // onEvent(run, {type:'tool'|'delta'|'need_ok'|'done'|'error', text})
+  start: function(run, onEvent){
+    var steps = SCRIPTS[run.agent];
+    var idx = 0;
+    run.output.push({ t:'系统', text:'› 上下文 ' + run.ctxLines + ' 行 · 约 ' + run.ctxChars + ' 字 · ' + (run.scopeLabel||'') });
+    run.output.push({ t:'系统', text:'› ' + (run.agent==='opencode' ? S.config.ocBin+' run --format json' : S.config.dshBin) + ' "' + run.task.slice(0,26) + '…"' });
+    onEvent(run, {type:'log', text:''});
+    function next(){
+      if(run.status !== 'running') return;
+      if(idx >= steps.length){
+        onEvent(run, {type:'done', text:''});
+        return;
+      }
+      var st = steps[idx++];
+      run.timer = setTimeout(function(){
+        if(run.status !== 'running') return;
+        if(st[1] === 'need_ok'){
+          run.status = 'waiting';
+          run.needOkText = st[2];
+          onEvent(run, {type:'need_ok', text:st[2]});
+          return;               // 等用户点「允许 / 拒绝」后再 resumeSteps()
+        }
+        onEvent(run, {type:st[1], text:st[2]});
+        if(st[1] !== 'done') next();
+      }, st[0]);
+    }
+    run.resumeSteps = next;
+    next();
+  },
+  stop: function(run){
+    clearTimeout(run.timer);
+  }
+};
+
+/* ============================================================
+   3. 运行管理：状态机 / 并发队列 / 写回
+   ============================================================ */
+function newId(agent){
+  var d = new Date();
+  return ''+d.getFullYear()+pad(d.getMonth()+1)+pad(d.getDate())+'-'+pad(d.getHours())+pad(d.getMinutes())+'-'+agent+'-'+Math.random().toString(36).slice(2,6);
+}
+function taskText(line){
+  return line.replace(/^\s*-\s*/,'').replace(/^\s*(TODO|DOING|DONE)\s*/i,'').replace(/\s*@(opencode|dsh)\s*$/,'').trim();
+}
+function isTask(line){ return /^\s*-\s+/.test(line) && !/^\s*-\s*🤖/.test(line) && !/^\s*<!--/.test(line); }
+
+function startRun(opt){
+  var note = activeNote();
+  var lines = note.text.split('\n');
+  var lineText = lines[opt.line] || '';
+  if(!isTask(lineText)){ toast('第 ' + (opt.line+1) + ' 行不是任务行，委派已取消', 'warn'); return null; }
+  var run = {
+    id: newId(opt.agent), agent: opt.agent, noteId: note.id,
+    line: opt.line, lineText: lineText, task: taskText(lineText) || '未命名任务',
+    scope: opt.scope, permission: opt.permission,
+    scopeLabel: opt.scope==='tree' ? '母项+子树' : (opt.scope==='line' ? '仅本行' : '整篇'),
+    ctxLines: opt.scope==='line' ? 1 : (opt.scope==='all' ? lines.length : 3),
+    ctxChars: opt.scope==='line' ? lineText.length : (opt.scope==='all' ? note.text.length : 180),
+    status:'queued', startedAt:null, endedAt:null, output:[], step:0,
+    needOkText:'', timer:null, resumeSteps:null, permissionGranted:false
+  };
+  runs.unshift(run);
+  openStreamId = run.id;
+  pumpQueue();
+  renderDeck(); syncDecor();
+  toast('已入队：' + run.task.slice(0,18) + (run.task.length>18?'…':''), '');
+  return run;
+}
+function runningCount(){ var n=0; for(var i=0;i<runs.length;i++) if(runs[i].status==='running'||runs[i].status==='waiting') n++; return n; }
+function pumpQueue(){
+  for(var i=runs.length-1;i>=0;i--){
+    if(runs[i].status !== 'queued') continue;
+    if(runningCount() >= 2) break;
+    begin(runs[i]);
+  }
+}
+function begin(run){
+  run.status = 'running';
+  run.startedAt = new Date();
+  AgentAdapter.start(run, onAgentEvent);
+  renderDeck(); syncDecor();
+}
+function onAgentEvent(run, ev){
+  if(ev.type === 'log'){ renderDeck(); return; }
+  if(ev.type === 'tool') run.output.push({ t:'$', text:ev.text });
+  else if(ev.type === 'delta') run.output.push({ t:'·', text:ev.text });
+  else if(ev.type === 'need_ok') run.output.push({ t:'!', text:ev.text });
+  else if(ev.type === 'error') run.output.push({ t:'ERR', text:ev.text });
+  else if(ev.type === 'done'){
+    run.status = 'done';
+    run.endedAt = new Date();
+    AgentAdapter.stop(run);
+    writeBack(run);
+    run.output.push({ t:'✓', text:'完成 · 结论已写回笔记' });
+    toast('✓ 结论已写回「' + run.task.slice(0,14) + '」下方', 'ok');
+    pumpQueue();
+  }
+  renderDeck(); syncDecor();
+}
+function stopRun(id){
+  var r = findRun(id); if(!r) return;
+  if(r.status==='done'||r.status==='stopped') return;
+  AgentAdapter.stop(r);
+  r.status = 'stopped'; r.endedAt = new Date();
+  r.output.push({ t:'!', text:'已停止 · 保留已收到的输出' });
+  toast('已停止 ' + r.id, 'warn');
+  pumpQueue(); renderDeck(); syncDecor();
+}
+function resolveNeedOk(id, allow){
+  var r = findRun(id); if(!r || r.status!=='waiting') return;
+  r.permissionGranted = allow;
+  r.output.push({ t:'!', text: allow ? '→ 允许一次，继续执行' : '→ 拒绝写入，改为只读分析' });
+  r.status = 'running';
+  renderDeck(); syncDecor();
+  if(r.resumeSteps) r.resumeSteps();
+}
+function rerun(id){
+  var r = findRun(id); if(!r) return;
+  var line = findTaskLine(activeNote(), r);
+  startRun({ agent:r.agent, line:line, scope:r.scope, permission:r.permission });
+}
+function resumeChat(id){
+  var r = findRun(id); if(!r) return;
+  if(r.status==='running'||r.status==='waiting'){ toast('这个任务还在跑', 'warn'); return; }
+  toast('演示：续聊会带 --continue / --resume 再跑一轮', '');
+  var line = findTaskLine(activeNote(), r);
+  startRun({ agent:r.agent, line:line, scope:'line', permission:'ro' });
+}
+function findRun(id){ for(var i=0;i<runs.length;i++) if(runs[i].id===id) return runs[i]; return null; }
+
+/* 找任务行：优先按委派时记录的原文精确匹配，编辑过也能跟上 */
+function findTaskLine(note, run){
+  var lines = note.text.split('\n');
+  var last = -1;
+  for(var i=0;i<lines.length;i++) if(lines[i] === run.lineText && isTask(lines[i])) last = i;
+  if(last >= 0) return last;
+  return Math.min(run.line, lines.length-1);
+}
+
+/* 写回：基于当前磁盘内容插入，绝不整体覆盖 */
+function writeBack(run){
+  var note = null;
+  for(var i=0;i<S.notes.length;i++) if(S.notes[i].id===run.noteId) note = S.notes[i];
+  if(!note) return;
+  var lines = note.text.split('\n');
+  var idx = findTaskLine(note, run);
+  var sum = SUMMARIES[run.agent] || SUMMARIES.opencode;
+  // 用引用块承载整个回复：标准 Markdown 里是一个整体卡片，
+  // 不会被上一列表项吞成软换行；">" 行也不会被当成任务行再出现委派按钮。
+  var block = [
+    '  <!-- run: ' + run.id + ' -->',
+    '  > 🤖 **' + run.agent + '** · ' + hhmm(run.startedAt) + '–' + hhmm(run.endedAt),
+    '  > **结论**：' + sum.conclusion,
+    '  > **改动**：' + sum.changes,
+    '  > **未完成**：' + sum.todo,
+    '  > ↳ 原文 `.agent/runs/' + run.id + '.md`'
+  ];
+  // 若同一 runId 已写过（例如重放），先移除旧块，保证幂等
+  for(var j=0;j<lines.length;j++){
+    if(lines[j].indexOf('<!-- run: ' + run.id + ' -->') >= 0){
+      var end = j+1;
+      while(end < lines.length && lines[end].indexOf('<!-- run:')<0 &&
+            (/^\s*>\s?/.test(lines[end]) || /^\s*-\s*🤖/.test(lines[end]) || /^\s{4,}\S/.test(lines[end]))) end++;
+      lines.splice(j, end-j);
+      idx = Math.min(idx, j-1);
+      break;
+    }
+  }
+  // 光标补偿
+  var ta = $('ta');
+  var selS = ta.selectionStart, selE = ta.selectionEnd, isActive = (S.activeId===run.noteId);
+  var before = lines.slice(0, idx+1).join('\n').length + 1;
+  var inserted = block.join('\n').length + 1;
+  lines.splice(idx+1, 0, block.join('\n'));
+  note.text = lines.join('\n');
+  note.mtime = Date.now();
+  save();
+  if(isActive){
+    ta.value = note.text;
+    if(selS >= before) selS += inserted;
+    if(selE >= before) selE += inserted;
+    try{ ta.setSelectionRange(selS, selE); }catch(e){}
+  }
+  renderRail(); syncEditor();
+}
+
+/* 从正文解析锚点 -> 任务行索引 */
+function anchorsIn(text){
+  var lines = text.split('\n'), map = {};
+  for(var i=0;i<lines.length;i++){
+    var m = lines[i].match(/<!--\s*run:\s*(\S+)\s*-->/);
+    if(!m) continue;
+    for(var j=i-1;j>=0;j--){
+      if(isTask(lines[j])){ map[j] = m[1]; break; }
+      if(lines[j].trim()==='') break;
+    }
+  }
+  return map;
+}
+
+/* ============================================================
+   4. 渲染：左栏 / 编辑器 / 甲板
+   ============================================================ */
+function renderRail(){
+  // 内联输入可能被 500ms 的状态刷新重建，先保住已输入的内容与光标
+  var ae = document.activeElement;
+  var editing = (ae && (ae.id==='folderNameInput' || ae.id==='folderRenameInput'))
+    ? { v:ae.value, s:ae.selectionStart } : null;
+  var q = ($('search').value||'').trim().toLowerCase();
+  var match = function(n){
+    return !q || n.text.toLowerCase().indexOf(q)>=0 || titleOf(n.text).toLowerCase().indexOf(q)>=0;
+  };
+  var groups = sortedFolders().map(function(f){ return { id:f.id, name:f.name, notes:[] }; });
+  var loose = { id:'', name:'未归档', notes:[] };
+  S.notes.forEach(function(n){
+    if(!match(n)) return;
+    var f = folderById(n.folder);
+    (f ? groups.filter(function(g){ return g.id===f.id; })[0] : loose).notes.push(n);
+  });
+  groups.push(loose);   // 未归档永远在最后，同时作为拖放目标
+
+  var html = '<div class="group">目录 · ' + S.folders.length + ' 个 · ' + S.notes.length + ' 篇笔记</div>';
+  if(creatingFolder){
+    html += '<div style="padding:2px 4px 8px"><input class="folder-input" id="folderNameInput" placeholder="例如 05_notes · 自动小写补编号 · 回车确认" autocomplete="off"></div>';
+  }
+  var shown = 0;
+  groups.forEach(function(g){
+    var isLoose = (g.id === '');
+    if(q && !g.notes.length && !isLoose) return;   // 搜索时隐藏无结果的目录
+    var col = !!collapsed[g.id];
+    html += '<div class="fgroup' + (col?' collapsed':'') + '" data-folder="' + g.id + '">';
+    html += '<div class="folder" data-toggle="' + g.id + '"><span class="caret">' + (col?'▸':'▾') + '</span>';
+    if(!isLoose && editingFolderId === g.id){
+      html += '<input class="folder-input" id="folderRenameInput" value="' + esc(g.name) + '" autocomplete="off">';
+    } else {
+      html += '<span class="fname">' + esc(g.name) + '</span><span class="cnt">' + g.notes.length + '</span>';
+      if(!isLoose) html += '<button class="fmore" data-fmore="' + g.id + '" title="目录操作">⋯</button>';
+    }
+    html += '</div>';
+    if(!g.notes.length) html += '<div class="empty-folder">' + (q?'无匹配笔记':'拖笔记到这里') + '</div>';
+    g.notes.forEach(function(n){
+      var ar = runs.filter(function(r){ return r.noteId===n.id && (r.status==='running'||r.status==='waiting'||r.status==='queued'); });
+      var badge = ar.length ? '<span class="badge">' + ar.length + '</span>' : '';
+      html += '<div class="note' + (n.id===S.activeId?' sel':'') + '" data-id="' + n.id + '" draggable="true" title="' + esc(titleOf(n.text)) + ' · 拖到目录可移动"><span class="dot"></span><span class="txt">' + esc(titleOf(n.text)) + '</span>' + badge + '</div>';
+      shown++;
+    });
+    html += '</div>';
+  });
+  if(q && !shown) html += '<div class="empty">没有匹配的笔记</div>';
+  $('railList').innerHTML = html;
+  $('noteCount').textContent = S.notes.length + ' 篇 · ' + S.folders.length + ' 目录';
+  $('vaultLabel').textContent = S.config.vault;
+  $('edTitle').textContent = titleOf(activeNote().text);
+  var dir = folderNameOf(activeNote().folder);
+  $('edSub').textContent = 'vault/' + (dir==='未归档'?'':dir+'/') +
+    (activeNote().id==='n1'?'2026-11-15':activeNote().id) + '.md · ' + dir + ' · 修改于 ' + hhmm(new Date(activeNote().mtime));
+
+  if(editing){
+    var inp = $('folderRenameInput') || $('folderNameInput');
+    if(inp){
+      inp.value = editing.v; inp.focus();
+      try{ inp.setSelectionRange(editing.s, editing.s); }catch(e){}
+    }
+  } else if(creatingFolder){
+    var ci = $('folderNameInput'); if(ci) ci.focus();
+  } else if(editingFolderId){
+    var ri = $('folderRenameInput');
+    if(ri){
+      ri.focus();
+      try{ ri.setSelectionRange(0, ri.value.length); }catch(e){}
+    }
+  }
+}
+
+/* ============================================================
+   4b. 目录：创建 / 重命名 / 删除 / 移动笔记
+   ============================================================ */
+/* 目录名统一：全小写、空格转下划线、无编号时自动补下一个序号 */
+function normalizeFolderName(name){
+  name = (name||'').trim().toLowerCase().replace(/[\/\\]/g,'')
+           .replace(/\s+/g,'_').replace(/[^0-9a-z_\-\u4e00-\u9fa5]/g,'');
+  if(!name) return '';
+  if(!/^\d+_/.test(name)){
+    var max = 0;
+    S.folders.forEach(function(f){
+      var m = f.name.match(/^(\d+)_/);
+      if(m) max = Math.max(max, parseInt(m[1],10));
+    });
+    name = pad(max+1) + '_' + name;
+  }
+  return name;
+}
+/* 新建笔记默认目录：01_todo（找不到就退回第一个目录） */
+function taskFolderId(){
+  var f = S.folders.filter(function(x){ return /^01[_-]/.test(x.name) || x.name.indexOf('todo')>=0; })[0];
+  if(!f) f = S.folders[0];
+  return f ? f.id : '';
+}
+function startCreateFolder(){
+  editingFolderId = null;
+  creatingFolder = true;
+  renderRail();
+}
+function cancelFolderInput(){
+  creatingFolder = false; editingFolderId = null;
+  renderRail();
+}
+function commitFolderName(name, renameId){
+  name = normalizeFolderName(name);
+  if(!name){ cancelFolderInput(); return; }
+  if(S.folders.some(function(f){ return f.name===name && f.id!==renameId; })){
+    toast('已有同名目录', 'warn'); return;          // 保留输入让用户改
+  }
+  if(renameId){
+    var f = folderById(renameId);
+    if(f) f.name = name;
+    toast('目录已重命名为「' + name + '」', 'ok');
+  } else {
+    S.folders.push({ id:'f'+Date.now(), name:name });
+    toast('已创建目录「' + name + '」', 'ok');
+  }
+  creatingFolder = false; editingFolderId = null;
+  save(); renderRail(); renderDeck();
+}
+function deleteFolder(id){
+  var f = folderById(id); if(!f) return;
+  if(!confirm('删除目录「' + f.name + '」？里面的笔记会移到「未归档」，笔记本身不删除。')) return;
+  S.notes.forEach(function(n){ if(n.folder===id) n.folder=''; });
+  S.folders = S.folders.filter(function(x){ return x.id!==id; });
+  delete collapsed[id];
+  save(); renderRail(); renderDeck();
+  toast('目录已删除，笔记移到未归档', 'ok');
+}
+function moveNote(noteId, folderId){
+  var n = noteById(noteId); if(!n || n.folder===folderId) return;
+  n.folder = folderId;
+  save(); renderRail(); renderDeck();
+  toast('「' + titleOf(n.text).slice(0,12) + '」→ ' + folderNameOf(folderId), 'ok');
+}
+function newNoteIn(folderId){
+  var id = 'n' + Date.now();
+  S.notes.unshift({ id:id, folder:folderId||'', mtime:Date.now(),
+    text:'# 未命名笔记\n\n- TODO 在这里写第一条任务，然后按 ⌘↵ 委派\n' });
+  S.activeId = id;
+  $('search').value = '';
+  creatingFolder = false; editingFolderId = null;
+  collapsed[folderId||''] = false;
+  save(); $('ta').value = activeNote().text; $('ta').scrollTop = 0;
+  renderRail(); syncEditor(); renderDeck();
+  toast('已新建笔记' + (folderId ? '于 ' + folderNameOf(folderId) : ''), 'ok');
+}
+function deleteNote(id){
+  if(S.notes.length<=1){ toast('至少保留一篇', 'warn'); return; }
+  var n = noteById(id); if(!n) return;
+  if(!confirm('删除「' + titleOf(n.text) + '」？')) return;
+  S.notes = S.notes.filter(function(x){ return x.id!==id; });
+  if(S.activeId===id) S.activeId = S.notes[0].id;
+  $('ta').value = activeNote().text;
+  save(); renderRail(); syncEditor(); renderDeck(); toast('已删除');
+}
+function resetActiveNote(){
+  var orig = seed().notes.filter(function(n){ return n.id===S.activeId; })[0];
+  if(!orig){ toast('预置笔记才能重置', 'warn'); return; }
+  activeNote().text = orig.text; $('ta').value = orig.text;
+  save(); renderRail(); syncEditor(); toast('本篇已重置', 'ok');
+}
+
+/* 通用弹出菜单：items = [{label, action, danger?, sep?}] */
+function showMenu(x, y, items){
+  var m = $('menu');
+  menuItems = items;
+  m.innerHTML = items.map(function(it, i){
+    return it.sep ? '<hr>' : '<div data-mi="' + i + '"' + (it.danger?' class="danger"':'') + '>' + esc(it.label) + '</div>';
+  }).join('');
+  m.style.top = Math.max(8, Math.min(window.innerHeight - items.length*30 - 24, y)) + 'px';
+  m.style.left = Math.max(8, Math.min(window.innerWidth - 190, x)) + 'px';
+  m.classList.add('on'); showMask();
+}
+function openMoveMenu(x, y, noteId){
+  var n = noteById(noteId); if(!n) return;
+  var items = [{ label:'移动到目录：', action:null }];
+  sortedFolders().forEach(function(f){
+    items.push({ label:(n.folder===f.id?'✓  ':'　  ') + f.name,
+                 action:(function(fid){ return function(){ moveNote(noteId, fid); }; })(f.id) });
+  });
+  items.push({ label:(n.folder===''?'✓  ':'　  ') + '未归档', action:function(){ moveNote(noteId, ''); } });
+  showMenu(x, y, items);
+}
+function openFolderMenu(fid, x, y){
+  var f = folderById(fid); if(!f) return;
+  var cnt = S.notes.filter(function(n){ return n.folder===fid; }).length;
+  showMenu(x, y, [
+    { label:'重命名目录', action:function(){ editingFolderId=fid; creatingFolder=false; renderRail(); } },
+    { label:'在此新建笔记', action:function(){ newNoteIn(fid); } },
+    { sep:true },
+    { label:'删除目录（' + cnt + ' 篇移到未归档）', danger:true, action:function(){ deleteFolder(fid); } }
+  ]);
+}
+function openNoteMenu(x, y, noteId){
+  var n = noteById(noteId); if(!n) return;
+  showMenu(x, y, [
+    { label:'移动到目录…', action:function(){ openMoveMenu(x, y, noteId); } },
+    { label:'在同目录新建笔记', action:function(){ newNoteIn(n.folder); } },
+    { sep:true },
+    { label:'删除这篇笔记', danger:true, action:function(){ deleteNote(noteId); } }
+  ]);
+}
+
+function cursorLine(){
+  var ta = $('ta');
+  return ta.value.slice(0, ta.selectionStart).split('\n').length - 1;
+}
+function syncEditor(){ syncGutter(); syncDecor(); renderPreview(); }
+function syncGutter(){
+  var n = $('ta').value.split('\n').length, h = '';
+  for(var i=1;i<=n+2;i++) h += '<div class="gline">' + i + '</div>';
+  $('gutter').innerHTML = h;
+  applyScroll();
+}
+function syncDecor(){
+  var ta = $('ta'), lines = ta.value.split('\n');
+  var anchors = anchorsIn(ta.value);
+  var cur = cursorLine();
+  var html = '';
+  lines.forEach(function(line, i){
+    if(!isTask(line)) return;
+    var rid = anchors[i], r = rid ? findRun(rid) : null;
+    var top = 14 + i*26;
+    var inner = '';
+    if(r && (r.status==='running'||r.status==='waiting'||r.status==='queued'||r.status==='done'||r.status==='stopped')){
+      var label = r.status==='running' ? '运行中 ' + dur(Date.now()-r.startedAt.getTime())
+                : r.status==='waiting' ? '待确认'
+                : r.status==='queued'  ? '排队中'
+                : r.status==='done'    ? '完成 ' + dur(r.endedAt-r.startedAt)
+                : '已停止';
+      var cls = r.status==='running'?'run':r.status==='waiting'?'wait':r.status==='queued'?'queue':r.status==='done'?'done':'stop';
+      inner = '<button class="pill ' + cls + '" data-open="' + r.id + '"><span class="tick"></span>' + label + '</button>';
+    } else if(i === cur && tab === 'edit'){
+      inner = '<button class="dele" data-dele="' + i + '">↗ 委派</button>';
+    }
+    if(inner) html += '<div class="drow" style="top:' + top + 'px">' + inner + '</div>';
+  });
+  // AI 回复块在编辑器里给一层淡绿底，让纯 Markdown 源码看起来是一个整体
+  var bg = '', inAi = false;
+  lines.forEach(function(line, i){
+    var quote = /^\s*>\s?/.test(line);
+    var oldHead = /^\s*-\s*🤖/.test(line);
+    var cont = inAi && /^\s{4,}\S/.test(line);
+    inAi = quote || oldHead || cont;
+    if(inAi) bg += '<div class="airow" style="top:' + (14+i*26) + 'px"></div>';
+  });
+  $('aibginner').innerHTML = bg;
+  $('dinner').innerHTML = html;
+  applyScroll();
+}
+function applyScroll(){
+  var y = $('ta').scrollTop;
+  $('gutter').style.transform = 'translateY(' + (-y) + 'px)';
+  $('dinner').style.transform = 'translateY(' + (-y) + 'px)';
+  $('aibginner').style.transform = 'translateY(' + (-y) + 'px)';
+}
+function inlineMd(s){
+  return esc(s).replace(/`([^`]+)`/g, '<code>$1</code>')
+              .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+              .replace(/@(opencode|dsh)/g, '<code>@$1</code>');
+}
+function renderPreview(){
+  if(tab !== 'preview') return;
+  var lines = $('ta').value.split('\n'), out = [], inList = false, inQuote = false;
+  function closeList(){ if(inList){ out.push('</ul>'); inList = false; } }
+  function closeQuote(){ if(inQuote){ out.push('</blockquote>'); inQuote = false; } }
+  function aiLine(t){
+    if(!inQuote){ out.push('<blockquote class="ai">'); inQuote = true; }
+    out.push('<div>' + inlineMd(t) + '</div>');
+  }
+  for(var i=0;i<lines.length;i++){
+    var l = lines[i];
+    if(/^\s*<!--/.test(l)) continue;                    // 隐藏锚点不进预览
+    var q = l.match(/^\s*>\s?(.*)$/);                   // 新写回格式：整块引用
+    if(q){ closeList(); aiLine(q[1]); continue; }
+    // 兼容旧写回格式：  - 🤖 标题 + 后续 4 空格缩进行
+    if(/^\s*-\s*🤖/.test(l)){
+      closeList();
+      aiLine(l.replace(/^\s*-\s*/, ''));
+      var k = i+1;
+      while(k<lines.length && /^\s{4,}\S/.test(lines[k]) && lines[k].indexOf('<!-- run:')<0){
+        aiLine(lines[k].trim()); k++;
+      }
+      i = k-1; continue;
+    }
+    closeQuote();
+    var t = inlineMd(l);
+    if(/^#\s/.test(l)){ closeList(); out.push('<h1>'+t.replace(/^#\s/,'')+'</h1>'); }
+    else if(/^##\s/.test(l)){ closeList(); out.push('<h2>'+t.replace(/^##\s/,'')+'</h2>'); }
+    else if(/^\s*-\s/.test(l)){ if(!inList){ out.push('<ul>'); inList=true; } out.push('<li>'+t.replace(/^\s*-\s/,'')+'</li>'); }
+    else if(l.trim()===''){ closeList(); }             // 不再塞 <p>&nbsp;</p>，避免多余空白
+    else { closeList(); out.push('<p>'+t+'</p>'); }
+  }
+  closeList(); closeQuote();
+  $('preview').innerHTML = out.join('');
+}
+
+function statusLabel(r){
+  return r.status==='running' ? '● 运行中 ' + dur(Date.now()-r.startedAt.getTime())
+       : r.status==='waiting' ? '● 待确认'
+       : r.status==='queued'  ? '○ 排队中'
+       : r.status==='done'    ? '✓ 已完成 ' + dur(r.endedAt-r.startedAt)
+       : r.status==='stopped' ? '■ 已停止'
+       : '○ 空闲';
+}
+function statusClass(r){
+  return r.status==='running'?'run':r.status==='waiting'?'wait':r.status==='queued'?'queue':r.status==='done'?'done':'stop';
+}
+function lastRun(agent){
+  for(var i=0;i<runs.length;i++) if(runs[i].agent===agent && (runs[i].status==='done'||runs[i].status==='stopped')) return runs[i];
+  return null;
+}
+function renderDeck(){
+  var html = '';
+  ['opencode','dsh'].forEach(function(ag){
+    var active = null;
+    for(var i=0;i<runs.length;i++) if(runs[i].agent===ag && ['queued','running','waiting','done','stopped'].indexOf(runs[i].status)>=0){ active = runs[i]; break; }
+    var busy = active && (active.status==='running'||active.status==='waiting'||active.status==='queued');
+    var cls = 'acard' + (busy && active.status==='running' ? ' busy' : '') + (busy && active.status==='waiting' ? ' waiting' : '');
+    html += '<div class="' + cls + '">';
+    html += '<div class="acard-h"><span class="avatar ' + (ag==='oc'?'oc':'dsh') + '">' + (ag==='opencode'?'O':'D') + '</span><span class="nm">' + ag + '</span><span class="st ' + (active?statusClass(active):'idle') + '">' + (active?statusLabel(active):'○ 空闲') + '</span></div>';
+    if(active){
+      html += '<div class="taskline">' + esc(active.task) + '</div>';
+      if(active.status==='running'){
+        var pct = Math.min(92, 12 + (Date.now()-active.startedAt.getTime())/120);
+        html += '<div class="prog"><i style="width:' + pct + '%"></i></div>';
+      }
+      if(active.status==='waiting'){
+        html += '<div class="needok">' + esc(active.needOkText) + '<div class="acts"><span class="pri" data-allow="' + active.id + '">允许一次</span><span data-deny="' + active.id + '">拒绝（只读）</span></div></div>';
+      }
+      if(openStreamId === active.id){
+        html += '<div class="stream" id="streamBox">' + active.output.map(function(o){
+          var c = o.t==='$' ? 't' : (o.t==='ERR'?'er':(o.t==='✓'?'ok':'d'));
+          return '<span class="' + c + '">' + esc(o.t) + ' ' + esc(o.text) + '</span>';
+        }).join('\n') + '</div>';
+      }
+      var acts = '';
+      if(active.status==='running'||active.status==='waiting'||active.status==='queued') acts += '<span class="red" data-stop="' + active.id + '">停止</span>';
+      acts += '<span data-stream="' + active.id + '">' + (openStreamId===active.id?'收起输出':'看输出') + '</span>';
+      if(active.status==='done'||active.status==='stopped') acts += '<span data-resume="' + active.id + '">续聊</span><span data-rerun="' + active.id + '">重跑</span>';
+      html += '<div class="acts">' + acts + '</div>';
+    } else {
+      var lr = lastRun(ag);
+      html += '<div class="taskline">' + (lr ? '最近：' + esc(lr.task) + ' · ' + hhmm(lr.endedAt) + ' 完成' : '等待委派 · 从笔记的任务行发起') + '</div>';
+      html += '<div class="acts"><span data-hint="1">在笔记里写 - TODO 后按 ⌘↵</span></div>';
+    }
+    html += '</div>';
+  });
+
+  html += '<div class="deck-sub">最近运行 · ' + runs.length + '</div>';
+  if(!runs.length) html += '<div class="empty">还没有委派记录</div>';
+  runs.slice(0,8).forEach(function(r){
+    var mark = r.status==='done' ? '✓' : r.status==='running' ? '●' : r.status==='waiting' ? '!' : r.status==='queued' ? '○' : '■';
+    html += '<div class="runrow" data-stream="' + r.id + '"><span class="who ' + (r.agent==='opencode'?'oc':'dsh') + '">' + (r.agent==='opencode'?'oc':'dsh') + '</span><span class="txt">' + esc(r.task) + '</span><span class="t">' + mark + ' ' + (r.startedAt?hhmm(r.startedAt):'--:--') + '</span></div>';
+  });
+  $('deckBody').innerHTML = html;
+  var sb = $('streamBox'); if(sb) sb.scrollTop = sb.scrollHeight;
+  $('concurrency').textContent = '并发 ' + runningCount() + ' / 2';
+  $('online').textContent = (runningCount() ? runningCount() + ' 个在跑' : '2 个就绪');
+  renderRail();
+}
+
+/* ============================================================
+   5. 交互
+   ============================================================ */
+function toast(msg, kind){
+  var t = $('toast');
+  t.textContent = msg; t.className = 'toast on ' + (kind||'');
+  clearTimeout(t._timer);
+  t._timer = setTimeout(function(){ t.className = 'toast'; }, 2600);
+}
+function closeOverlays(){
+  $('pop').classList.remove('on');
+  $('mask').classList.remove('on');
+  $('drawer').classList.remove('on');
+  $('menu').classList.remove('on');
+}
+function showMask(){ $('mask').classList.add('on'); }
+
+function openDelegate(line){
+  var lines = $('ta').value.split('\n');
+  if(line < 0 || line >= lines.length || !isTask(lines[line])){
+    toast('把光标放到 - TODO 这一行再委派', 'warn'); return;
+  }
+  var txt = lines[line];
+  var at = txt.match(/@(opencode|dsh)\s*$/);
+  popAgent = at ? at[1] : S.config.defaultAgent;
+  popLine = line;
+  document.querySelectorAll('#pop .opt').forEach(function(o){ o.classList.toggle('sel', o.dataset.agent===popAgent); });
+  $('perm').value = S.config.allowWrite ? 'rw' : 'ro';
+  $('popNote').innerHTML = '<b>任务：</b>' + esc(taskText(txt)) + '<br><b>来源：</b>vault · 第 ' + (line+1) + ' 行 · @' + popAgent;
+  $('popHint').textContent = '3 行 · 约 180 字';
+  var r = $('ta').getBoundingClientRect();
+  var top = Math.min(window.innerHeight-330, Math.max(60, r.top + 14 + line*26 - $('ta').scrollTop - 20));
+  $('pop').style.top = top + 'px';
+  $('pop').style.left = Math.max(20, Math.min(window.innerWidth-356, r.right - 350)) + 'px';
+  $('pop').classList.add('on'); showMask();
+}
+function sendDelegate(){
+  if(popLine < 0) return;
+  closeOverlays();
+  startRun({ agent:popAgent, line:popLine, scope:$('scope').value, permission:$('perm').value });
+  popLine = -1;
+}
+
+/* 左栏：选中 / 折叠 / 目录菜单 / 右键菜单 / 拖放移动 */
+var rail = $('railList');
+rail.addEventListener('click', function(e){
+  if((creatingFolder || editingFolderId) && !e.target.closest('.folder-input')) cancelFolderInput();
+  var more = e.target.closest('[data-fmore]');
+  if(more){
+    var mr = more.getBoundingClientRect();
+    openFolderMenu(more.dataset.fmore, mr.right-176, mr.bottom+4);
+    e.stopPropagation(); return;
+  }
+  var toggle = e.target.closest('[data-toggle]');
+  if(toggle && !e.target.closest('input')){
+    collapsed[toggle.dataset.toggle] = !collapsed[toggle.dataset.toggle];
+    renderRail(); return;
+  }
+  var el = e.target.closest('.note'); if(!el) return;
+  S.activeId = el.dataset.id; save(); openStreamId = null;
+  $('ta').value = activeNote().text;
+  $('ta').scrollTop = 0;
+  renderRail(); syncEditor(); renderDeck();
+});
+rail.addEventListener('contextmenu', function(e){
+  var el = e.target.closest('.note'); if(!el) return;
+  e.preventDefault();
+  openNoteMenu(e.clientX, e.clientY, el.dataset.id);
+});
+rail.addEventListener('keydown', function(e){
+  if(e.target.id==='folderNameInput' || e.target.id==='folderRenameInput'){
+    if(e.key==='Enter'){
+      e.preventDefault();
+      commitFolderName(e.target.value, e.target.id==='folderRenameInput' ? editingFolderId : null);
+    } else if(e.key==='Escape'){
+      e.preventDefault(); cancelFolderInput();
+    }
+  }
+});
+/* 内联输入只在显式点击别处 / Esc / Enter 时结束；
+   状态刷新会重建左栏，不能用 focusout 取消，否则会吞掉正在输入的名字 */
+rail.addEventListener('dragstart', function(e){
+  var el = e.target.closest('.note'); if(!el) return;
+  dragNoteId = el.dataset.id;
+  el.classList.add('dragging');
+  try{ e.dataTransfer.setData('text/plain', dragNoteId); e.dataTransfer.effectAllowed='move'; }catch(err){}
+});
+rail.addEventListener('dragover', function(e){
+  var g = e.target.closest('.fgroup'); if(!g || !dragNoteId) return;
+  e.preventDefault();
+  try{ e.dataTransfer.dropEffect='move'; }catch(err){}
+  rail.querySelectorAll('.dragover').forEach(function(x){ if(x!==g) x.classList.remove('dragover'); });
+  g.classList.add('dragover');
+});
+rail.addEventListener('drop', function(e){
+  var g = e.target.closest('.fgroup'); if(!g) return;
+  e.preventDefault();
+  var id = dragNoteId;
+  try{ id = id || e.dataTransfer.getData('text/plain'); }catch(err){}
+  rail.querySelectorAll('.dragover').forEach(function(x){ x.classList.remove('dragover'); });
+  dragNoteId = null;
+  if(id) moveNote(id, g.dataset.folder);
+});
+rail.addEventListener('dragend', function(){
+  dragNoteId = null;
+  rail.querySelectorAll('.dragging').forEach(function(x){ x.classList.remove('dragging'); });
+  rail.querySelectorAll('.dragover').forEach(function(x){ x.classList.remove('dragover'); });
+});
+$('search').addEventListener('input', renderRail);
+$('btnNew').addEventListener('click', function(){
+  newNoteIn(taskFolderId());   // 任务笔记默认进 01_todo
+});
+$('btnNewFolder').addEventListener('click', startCreateFolder);
+
+/* 编辑器 */
+var ta = $('ta');
+ta.addEventListener('input', function(){
+  var n = activeNote();
+  n.text = ta.value; n.mtime = Date.now();
+  $('edTitle').textContent = titleOf(n.text);
+  save(); syncGutter(); syncDecor();
+});
+ta.addEventListener('scroll', applyScroll);
+ta.addEventListener('click', syncDecor);
+ta.addEventListener('keyup', function(e){
+  if(['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Home','End','Enter'].indexOf(e.key)>=0) syncDecor();
+});
+document.querySelectorAll('.ed-tabs span').forEach(function(s){
+  s.addEventListener('click', function(){
+    tab = s.dataset.tab;
+    document.querySelectorAll('.ed-tabs span').forEach(function(x){ x.classList.toggle('on', x===s); });
+    $('preview').style.display = tab==='preview' ? 'block' : 'none';
+    ta.style.display = tab==='edit' ? 'block' : 'none';
+    $('decor').style.display = tab==='edit' ? '' : 'none';
+    if(tab==='preview') renderPreview(); else syncDecor();
+  });
+});
+
+/* 行尾装饰点击 */
+$('decor').addEventListener('click', function(e){
+  var b = e.target.closest('[data-dele],[data-open]'); if(!b) return;
+  if(b.dataset.dele !== undefined) openDelegate(parseInt(b.dataset.dele,10));
+  else { openStreamId = b.dataset.open; renderDeck(); }
+});
+
+/* 甲板点击 */
+$('deckBody').addEventListener('click', function(e){
+  var b = e.target.closest('[data-stop],[data-stream],[data-resume],[data-rerun],[data-allow],[data-deny],[data-hint]');
+  if(!b) return;
+  if(b.dataset.stop) stopRun(b.dataset.stop);
+  else if(b.dataset.allow) resolveNeedOk(b.dataset.allow, true);
+  else if(b.dataset.deny) resolveNeedOk(b.dataset.deny, false);
+  else if(b.dataset.rerun) rerun(b.dataset.rerun);
+  else if(b.dataset.resume) resumeChat(b.dataset.resume);
+  else if(b.dataset.hint) toast('在左边写 - TODO 任务行，光标停在那行按 ⌘↵', '');
+  else if(b.dataset.stream){ openStreamId = (openStreamId===b.dataset.stream ? null : b.dataset.stream); renderDeck(); }
+});
+
+/* 浮层 */
+document.querySelectorAll('#pop .opt').forEach(function(o){
+  o.addEventListener('click', function(){
+    popAgent = o.dataset.agent;
+    document.querySelectorAll('#pop .opt').forEach(function(x){ x.classList.toggle('sel', x===o); });
+    $('popNote').innerHTML = '<b>任务：</b>' + esc(taskText($('ta').value.split('\n')[popLine]||'')) + '<br><b>来源：</b>vault · 第 ' + (popLine+1) + ' 行 · @' + popAgent;
+  });
+});
+$('popSend').addEventListener('click', sendDelegate);
+$('popCancel').addEventListener('click', closeOverlays);
+$('mask').addEventListener('click', closeOverlays);
+
+/* 顶栏 / 设置 / 菜单 */
+$('btnFold').addEventListener('click', function(){
+  deckFolded = !deckFolded;
+  $('deck').style.display = deckFolded ? 'none' : '';
+  $('app').style.gridTemplateColumns = deckFolded ? '212px minmax(0,1fr)' : '212px minmax(0,1fr) 312px';
+  $('btnFold').textContent = deckFolded ? '展开甲板' : '收起甲板';
+});
+$('btnSettings').addEventListener('click', function(){
+  $('cfgVault').value = S.config.vault; $('cfgDefault').value = S.config.defaultAgent;
+  $('cfgOc').value = S.config.ocBin; $('cfgDsh').value = S.config.dshBin;
+  $('cfgWrite').checked = S.config.allowWrite; $('cfgTimeout').value = S.config.timeoutMin;
+  $('drawer').classList.add('on'); showMask();
+});
+$('drClose').addEventListener('click', closeOverlays);
+$('drSave').addEventListener('click', function(){
+  S.config.vault = $('cfgVault').value.trim() || '~/notes/vault';
+  S.config.defaultAgent = $('cfgDefault').value;
+  S.config.ocBin = $('cfgOc').value.trim() || 'opencode';
+  S.config.dshBin = $('cfgDsh').value.trim() || 'dsh --profile headless';
+  S.config.allowWrite = $('cfgWrite').checked;
+  S.config.timeoutMin = Math.max(1, parseInt($('cfgTimeout').value,10)||10);
+  save(); renderRail(); closeOverlays(); toast('设置已保存', 'ok');
+});
+$('drReset').addEventListener('click', function(){
+  if(!confirm('重置为初始演示数据？当前笔记改动会丢失。')) return;
+  try{ localStorage.removeItem(KEY); }catch(e){}
+  S = seed(); runs = []; openStreamId = null;
+  collapsed = {}; creatingFolder = false; editingFolderId = null;
+  ta.value = activeNote().text; ta.scrollTop = 0;
+  save(); renderRail(); syncEditor(); renderDeck(); closeOverlays();
+  toast('已重置演示数据', 'ok');
+});
+$('btnMore').addEventListener('click', function(e){
+  e.stopPropagation();
+  var r = $('btnMore').getBoundingClientRect();
+  var x = r.right-176, y = r.bottom+6;
+  var nid = activeNote().id;
+  showMenu(x, y, [
+    { label:'重命名（改第一行 # 标题）', action:function(){
+        ta.focus(); try{ ta.setSelectionRange(2,2); }catch(err){}
+        toast('改第一行 # 后面的文字即可重命名', '');
+      } },
+    { label:'移动到目录…', action:function(){ openMoveMenu(x, y, nid); } },
+    { label:'重置本篇为初始内容', action:resetActiveNote },
+    { sep:true },
+    { label:'删除这篇笔记', danger:true, action:function(){ deleteNote(nid); } }
+  ]);
+});
+$('menu').addEventListener('click', function(e){
+  var d = e.target.closest('[data-mi]'); if(!d) return;
+  var it = menuItems[parseInt(d.dataset.mi,10)];
+  closeOverlays();
+  if(it && it.action) it.action();
+});
+
+/* 快捷键 */
+document.addEventListener('keydown', function(e){
+  var mod = e.metaKey || e.ctrlKey;
+  if(e.key === 'Escape'){ closeOverlays(); return; }
+  var ae = document.activeElement;
+  var inFolderInput = ae && /^folder(Name|Rename)Input$/.test(ae.id||'');
+  if(mod && e.key === 'Enter'){
+    if(inFolderInput) return;
+    e.preventDefault();
+    if($('pop').classList.contains('on')) sendDelegate();
+    else openDelegate(cursorLine());
+  }
+  if(mod && (e.key==='k'||e.key==='K')){ e.preventDefault(); $('search').focus(); }
+  if(mod && (e.key==='n'||e.key==='N')){
+    e.preventDefault();
+    if(e.shiftKey) startCreateFolder(); else $('btnNew').click();
+  }
+});
+document.addEventListener('click', function(e){
+  if(!e.target.closest('#menu') && !e.target.closest('#btnMore')) $('menu').classList.remove('on');
+});
+
+/* 启动 */
+ta.value = activeNote().text;
+renderRail(); syncEditor(); renderDeck();
+tickTimer = setInterval(function(){
+  var any = runs.some(function(r){ return r.status==='running'||r.status==='waiting'; });
+  if(any) renderDeck();
+  syncDecor();
+}, 500);
+setTimeout(function(){
+  var pos = ta.value.indexOf('- TODO 整理');
+  if(pos < 0) pos = 0;
+  ta.focus();
+  try{ ta.setSelectionRange(pos, pos); }catch(e){}
+  syncDecor();
+}, 200);
+
+})();
+</script>
+</body>
+</html>

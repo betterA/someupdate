@@ -1,0 +1,675 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>笔记 × Agent · Design v0.1</title>
+<style>
+:root{
+  --bg:#f6f7f9;
+  --surface:#ffffff;
+  --surface-2:#fafbfc;
+  --line:#e5e8ed;
+  --line-2:#eef0f3;
+  --ink:#1b1f26;
+  --ink-2:#505866;
+  --ink-3:#8b93a1;
+  --accent:#4f46e5;
+  --accent-soft:#eef0ff;
+  --oc:#ea6c1f;
+  --oc-soft:#fff3e9;
+  --dsh:#6d5ce7;
+  --dsh-soft:#f0edff;
+  --blue:#2563eb;
+  --blue-soft:#eaf1ff;
+  --green:#159447;
+  --green-soft:#e9f7ef;
+  --amber:#c07a06;
+  --amber-soft:#fff5e2;
+  --red:#d33b3b;
+  --red-soft:#fdeeee;
+  --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  --sans:-apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",Inter,system-ui,sans-serif;
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:14px;line-height:1.65;-webkit-font-smoothing:antialiased}
+.page{max-width:1180px;margin:0 auto;padding:0 32px 100px}
+
+/* ---------- masthead ---------- */
+.masthead{padding:64px 0 44px;border-bottom:1px solid var(--line)}
+.eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:.14em;color:var(--accent);text-transform:uppercase;margin-bottom:18px}
+h1{font-size:42px;line-height:1.15;letter-spacing:-.02em;margin:0 0 14px;font-weight:650}
+.lede{font-size:18px;line-height:1.6;color:var(--ink-2);margin:0 0 26px;max-width:760px}
+.lede b{color:var(--ink);font-weight:600}
+.metarow{display:flex;flex-wrap:wrap;gap:8px}
+.chip{font-size:12px;color:var(--ink-2);background:var(--surface);border:1px solid var(--line);border-radius:6px;padding:5px 10px}
+.chip b{color:var(--ink);font-weight:600}
+
+/* ---------- sections ---------- */
+section{padding:52px 0 8px}
+.sec-head{display:flex;align-items:baseline;gap:14px;margin-bottom:24px}
+.num{font-family:var(--mono);font-size:12px;color:var(--accent);border:1px solid #dcdffa;background:var(--accent-soft);border-radius:5px;padding:2px 7px;flex:none}
+h2{font-size:22px;font-weight:640;letter-spacing:-.01em;margin:0;flex:none}
+.sec-head p{margin:0;color:var(--ink-3);font-size:13px}
+h3{font-size:15px;font-weight:640;margin:32px 0 12px}
+p{margin:0 0 12px}
+.muted{color:var(--ink-2)}
+.small{font-size:12.5px;color:var(--ink-3)}
+
+/* ---------- generic blocks ---------- */
+.card{background:var(--surface);border:1px solid var(--line);border-radius:10px}
+.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+.grid2{display:grid;grid-template-columns:repeat(2,1fr);gap:12px}
+.pad{padding:18px 20px}
+.kicker{font-family:var(--mono);font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-3);margin-bottom:9px}
+.card h4{margin:0 0 7px;font-size:14.5px;font-weight:640}
+.card p{margin:0;font-size:13px;color:var(--ink-2);line-height:1.6}
+table{width:100%;border-collapse:collapse;font-size:13px;background:var(--surface);border:1px solid var(--line);border-radius:10px;overflow:hidden}
+th{text-align:left;font-size:11.5px;letter-spacing:.04em;color:var(--ink-3);font-weight:600;background:var(--surface-2);padding:10px 14px;border-bottom:1px solid var(--line)}
+td{padding:11px 14px;border-bottom:1px solid var(--line-2);vertical-align:top;color:var(--ink-2)}
+tr:last-child td{border-bottom:none}
+td b{color:var(--ink);font-weight:600}
+.yes{color:var(--green);font-weight:600}
+.no{color:var(--ink-3)}
+code{font-family:var(--mono);font-size:12px;background:#f1f3f6;border:1px solid #e7eaee;border-radius:4px;padding:1px 5px;color:#3b4250}
+pre{font-family:var(--mono);font-size:12px;line-height:1.75;background:#fbfcfd;border:1px solid var(--line);border-radius:9px;padding:16px 18px;margin:0;overflow:auto;color:#39404c;white-space:pre}
+pre .c{color:#98a1ae}
+pre .k{color:#4f46e5}
+pre .s{color:#159447}
+pre .p{color:#b06a00}
+hr.soft{border:none;border-top:1px solid var(--line);margin:34px 0}
+ul.clean{list-style:none;padding:0;margin:0}
+ul.clean li{position:relative;padding-left:18px;margin-bottom:7px;color:var(--ink-2);font-size:13px}
+ul.clean li:before{content:"";position:absolute;left:2px;top:9px;width:5px;height:5px;border-radius:50%;background:#c6ccd6}
+ul.clean li b{color:var(--ink)}
+
+/* ---------- mock browser ---------- */
+.shot-wrap{margin-top:16px}
+.statebar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px}
+.statebar .lbl{font-size:12px;color:var(--ink-3);margin-right:2px}
+.seg{display:inline-flex;background:#e9ecf1;border-radius:7px;padding:3px;gap:2px}
+.seg button{font-family:var(--sans);font-size:12.5px;border:0;background:transparent;color:var(--ink-2);padding:5px 13px;border-radius:5px;cursor:pointer;transition:.15s}
+.seg button.on{background:var(--surface);color:var(--ink);font-weight:600;box-shadow:0 1px 2px rgba(20,25,35,.09)}
+.legend{margin-left:auto;display:flex;gap:12px;font-size:11.5px;color:var(--ink-3)}
+.legend i{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:5px;vertical-align:1px}
+.browser{background:var(--surface);border:1px solid #dfe3e9;border-radius:12px;box-shadow:0 12px 34px rgba(24,32,48,.07);overflow:hidden}
+.browser-bar{height:38px;background:#f4f6f8;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:12px;padding:0 14px}
+.dots{display:flex;gap:6px}
+.dots i{width:9px;height:9px;border-radius:50%;background:#d8dde4}
+.addr{font-family:var(--mono);font-size:11px;color:var(--ink-3);background:#eceff3;border-radius:5px;padding:3px 10px}
+.bar-right{margin-left:auto;font-size:11px;color:var(--ink-3)}
+.app{display:grid;grid-template-columns:206px minmax(0,1fr) 296px;height:520px}
+
+/* left rail */
+.rail{background:#fafbfc;border-right:1px solid var(--line);display:flex;flex-direction:column;min-width:0}
+.rail-top{padding:14px 14px 10px;border-bottom:1px solid var(--line-2)}
+.brand{display:flex;align-items:center;gap:8px;font-size:13px;font-weight:650;margin-bottom:12px}
+.brand .logo{width:18px;height:18px;border-radius:5px;background:var(--accent);display:grid;place-items:center;color:#fff;font-size:10px;font-weight:700}
+.newbtn{width:100%;border:1px solid #dde1e8;background:#fff;border-radius:6px;padding:6px 9px;font-size:12px;color:var(--ink-2);text-align:left;cursor:default;display:flex;justify-content:space-between}
+.search{border:1px solid var(--line);background:#fff;border-radius:6px;padding:5px 8px;font-size:11.5px;color:#aab1bd;margin-top:8px}
+.rail-list{padding:12px 8px;overflow:hidden;flex:1}
+.group{font-family:var(--mono);font-size:10px;color:#a2aab7;letter-spacing:.08em;padding:0 7px;margin:0 0 6px}
+.note{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--ink-2);padding:6px 8px;border-radius:5px;margin-bottom:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.note .dot{width:5px;height:5px;border-radius:50%;background:#c9cfd9;flex:none}
+.note.sel{background:#eef0ff;color:#3730b8;font-weight:600}
+.note.sel .dot{background:var(--accent)}
+.note .badge{margin-left:auto;font-family:var(--mono);font-size:9px;color:#fff;background:var(--blue);border-radius:8px;padding:1px 5px}
+.rail-foot{border-top:1px solid var(--line-2);padding:10px 14px;font-size:11px;color:var(--ink-3);display:flex;justify-content:space-between}
+.rail-foot span:last-child{font-family:var(--mono)}
+
+/* editor */
+.editor{display:flex;flex-direction:column;min-width:0;background:#fff}
+.ed-head{padding:13px 20px 11px;border-bottom:1px solid var(--line-2)}
+.ed-title{font-size:16px;font-weight:640;letter-spacing:-.01em}
+.ed-sub{font-size:11px;color:var(--ink-3);margin-top:3px;font-family:var(--mono)}
+.ed-tabs{display:flex;gap:14px;margin-top:10px;font-size:11.5px;color:var(--ink-3)}
+.ed-tabs b{color:var(--ink);border-bottom:2px solid var(--accent);padding-bottom:3px;font-weight:600}
+.cm{flex:1;padding:14px 0 0;font-family:var(--mono);font-size:12px;line-height:26px;overflow:hidden}
+.cm-line{position:relative;display:flex;align-items:flex-start;padding-right:12px;white-space:pre}
+.cm-line .ln{width:38px;flex:none;text-align:right;padding-right:14px;color:#c2c9d3;user-select:none}
+.cm-line .src{flex:1;min-width:0;color:#3a424f;overflow:hidden;text-overflow:ellipsis;white-space:pre}
+.cm-line .src .h{color:#1b1f26;font-weight:600}
+.cm-line .src .kw{color:#4f46e5}
+.cm-line .src .dim{color:#9aa3b0}
+.cm-line .src .ag-oc{color:var(--oc)}
+.cm-line .src .ag-dsh{color:var(--dsh)}
+.cm-line.active{background:#f7f8ff}
+.cm-line.active:before{content:"";position:absolute;left:0;top:0;bottom:0;width:2px;background:var(--accent)}
+.deco{flex:none;margin-left:8px;align-self:center}
+.pill{display:inline-flex;align-items:center;gap:5px;font-family:var(--sans);font-size:10.5px;font-weight:600;border-radius:20px;padding:2px 9px;white-space:nowrap}
+.pill .tick{width:6px;height:6px;border-radius:50%;background:currentColor}
+.pill.run{background:var(--blue-soft);color:var(--blue)}
+.pill.run .tick{animation:pulse 1.4s infinite}
+.pill.done{background:var(--green-soft);color:var(--green)}
+.pill.queue{background:#f0f2f5;color:#7d8694}
+.pill.fail{background:var(--red-soft);color:var(--red)}
+.pill.wait{background:var(--amber-soft);color:var(--amber)}
+@keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.35;transform:scale(.7)}}
+.ghost{border:1px solid #d9dde5;background:#fff;color:var(--ink-2);font-size:10.5px;border-radius:5px;padding:2px 8px;white-space:nowrap}
+.ghost.primary{border-color:#cfd2fb;background:var(--accent-soft);color:#4338ca;font-weight:600}
+.ai-block{margin:2px 0 4px 38px;border-left:2px solid #c9e6d5;background:#f7fcf9;border-radius:0 6px 6px 0;padding:7px 11px;font-family:var(--sans);font-size:11.5px;line-height:1.65;color:#45604f;white-space:normal}
+.ai-block .ai-h{display:flex;align-items:center;gap:7px;font-size:10px;color:#7d9487;margin-bottom:4px;font-family:var(--mono);letter-spacing:.02em}
+.ai-block .ai-h .lock{margin-left:auto;border:1px solid #d7e7dc;border-radius:4px;padding:0 5px}
+.ed-foot{border-top:1px solid var(--line-2);padding:8px 16px;display:flex;gap:14px;font-size:11px;color:var(--ink-3);background:#fcfcfd}
+.ed-foot kbd{font-family:var(--mono);border:1px solid #dfe3e9;background:#fff;border-radius:4px;padding:1px 5px;color:var(--ink-2)}
+
+/* agent deck */
+.deck{background:#fafbfc;border-left:1px solid var(--line);display:flex;flex-direction:column;min-width:0}
+.deck-head{padding:13px 14px 10px;border-bottom:1px solid var(--line-2);display:flex;align-items:center}
+.deck-head .kicker{margin:0}
+.deck-head .online{margin-left:auto;font-size:10px;color:var(--green);background:var(--green-soft);border-radius:10px;padding:1px 7px}
+.deck-body{padding:12px;overflow:hidden;flex:1}
+.acard{border:1px solid var(--line);background:#fff;border-radius:8px;padding:11px 12px;margin-bottom:9px;box-shadow:0 1px 2px rgba(20,25,35,.03)}
+.acard.busy{border-color:#cddcf7}
+.acard-h{display:flex;align-items:center;gap:7px;margin-bottom:8px}
+.avatar{width:19px;height:19px;border-radius:5px;display:grid;place-items:center;font-size:10px;font-weight:700;color:#fff;flex:none}
+.avatar.oc{background:var(--oc)}
+.avatar.dsh{background:var(--dsh)}
+.acard-h .nm{font-size:12px;font-weight:640}
+.acard-h .st{margin-left:auto;font-size:10px;font-weight:600}
+.st.run{color:var(--blue)}
+.st.idle{color:var(--ink-3)}
+.st.done{color:var(--green)}
+.taskline{font-size:11.5px;color:var(--ink-2);line-height:1.5;margin-bottom:7px}
+.prog{height:3px;border-radius:3px;background:#eceff3;overflow:hidden;margin-bottom:7px}
+.prog i{display:block;height:100%;background:var(--blue);width:62%;border-radius:3px}
+.stream{font-family:var(--mono);font-size:10px;color:#8a93a1;background:#f7f8fa;border-radius:5px;padding:6px 8px;line-height:1.55;margin-bottom:8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.acts{display:flex;gap:6px}
+.acts span{font-size:10.5px;color:var(--ink-2);border:1px solid var(--line);border-radius:5px;padding:2px 8px;background:#fff}
+.acts span.red{color:var(--red);border-color:#f3d7d7}
+.deck-sub{margin:16px 0 8px;font-family:var(--mono);font-size:10px;letter-spacing:.08em;color:var(--ink-3)}
+.runrow{display:flex;gap:8px;align-items:center;font-size:11px;color:var(--ink-2);padding:6px 2px;border-bottom:1px solid var(--line-2)}
+.runrow .who{font-family:var(--mono);font-size:9.5px;border-radius:4px;padding:1px 5px;flex:none}
+.runrow .who.oc{color:var(--oc);background:var(--oc-soft)}
+.runrow .who.dsh{color:var(--dsh);background:var(--dsh-soft)}
+.runrow .t{margin-left:auto;font-family:var(--mono);font-size:9.5px;color:var(--ink-3);flex:none}
+.deck-foot{border-top:1px solid var(--line-2);padding:9px 13px;font-size:10.5px;color:var(--ink-3);display:flex;justify-content:space-between}
+
+/* annotations */
+.annots{margin-top:14px;display:grid;grid-template-columns:repeat(2,1fr);gap:8px 22px}
+.annot{display:flex;gap:9px;font-size:12.5px;color:var(--ink-2);line-height:1.55}
+.annot .n{font-family:var(--mono);font-size:10px;color:#fff;background:var(--accent);width:16px;height:16px;border-radius:50%;display:grid;place-items:center;flex:none;margin-top:2px}
+.annot b{color:var(--ink);font-weight:600}
+
+/* ---------- flow ---------- */
+.flow{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-top:6px}
+.step{position:relative;background:var(--surface);border:1px solid var(--line);border-radius:9px;padding:16px 15px}
+.step:not(:last-child):after{content:"→";position:absolute;right:-13px;top:50%;transform:translateY(-50%);color:#b9c0cc;font-size:15px;z-index:2}
+.step .n{font-family:var(--mono);font-size:10.5px;color:var(--accent);letter-spacing:.08em}
+.step h4{font-size:13.5px;margin:6px 0 6px;font-weight:640}
+.step p{font-size:12px;color:var(--ink-2);line-height:1.55;margin:0}
+.states{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:16px;padding:14px 16px;background:var(--surface);border:1px solid var(--line);border-radius:9px;font-size:12px;color:var(--ink-2)}
+.states .arr{color:#b9c0cc}
+
+/* popover mock */
+.pop{margin-top:14px;background:#fff;border:1px solid #dfe3e9;border-radius:10px;box-shadow:0 14px 36px rgba(24,32,48,.13);width:330px;overflow:hidden}
+.pop-h{padding:11px 14px;border-bottom:1px solid var(--line-2);font-size:12px;font-weight:640;display:flex}
+.pop-h .esc{margin-left:auto;font-family:var(--mono);font-size:10px;color:var(--ink-3);font-weight:400}
+.opt{display:flex;align-items:center;gap:9px;padding:9px 14px;font-size:12.5px;border-bottom:1px solid var(--line-2)}
+.opt.sel{background:var(--accent-soft)}
+.opt .rd{width:12px;height:12px;border-radius:50%;border:1px solid #cbd1db;flex:none}
+.opt.sel .rd{border:4px solid var(--accent)}
+.opt .sub{margin-left:auto;font-size:10.5px;color:var(--ink-3)}
+.pop-ctx{padding:9px 14px;font-size:11.5px;color:var(--ink-2);display:flex;gap:8px;align-items:center}
+.pop-ctx select{margin-left:auto;font-size:11px;border:1px solid var(--line);border-radius:5px;padding:2px 6px;color:var(--ink-2);background:#fff}
+.pop-f{padding:10px 14px;background:#fafbfc;border-top:1px solid var(--line-2);display:flex;align-items:center;gap:8px}
+.pop-f .hint{font-size:10.5px;color:var(--ink-3);margin-right:auto}
+.btn{font-size:11.5px;border-radius:6px;padding:5px 12px;border:1px solid var(--line);background:#fff;color:var(--ink-2)}
+.btn.pri{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+
+/* architecture */
+.arch{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:20px}
+.layer{display:grid;grid-template-columns:104px 1fr;gap:14px;align-items:stretch;padding:11px 0;border-bottom:1px dashed var(--line-2)}
+.layer:last-child{border-bottom:none}
+.layer .lbl{font-family:var(--mono);font-size:10.5px;color:var(--ink-3);letter-spacing:.06em;padding-top:9px}
+.boxes{display:flex;gap:9px;flex-wrap:wrap}
+.box{border:1px solid var(--line);background:var(--surface-2);border-radius:7px;padding:8px 12px;font-size:12px;color:var(--ink-2);min-width:120px}
+.box b{display:block;color:var(--ink);font-size:12.5px;font-weight:640;margin-bottom:2px}
+.box.hl{border-color:#cfd2fb;background:var(--accent-soft)}
+.box.hl b{color:#3730b8}
+.box .sm{font-family:var(--mono);font-size:10px;color:var(--ink-3)}
+.arrowdown{text-align:center;color:#c2c9d3;font-size:14px;line-height:1;margin:2px 0}
+
+/* footer */
+.foot{margin-top:60px;padding-top:22px;border-top:1px solid var(--line);display:flex;justify-content:space-between;gap:20px;font-size:12px;color:var(--ink-3)}
+.tbd{background:#fff;border:1px solid var(--line);border-left:3px solid var(--amber);border-radius:8px;padding:14px 18px;margin-top:14px}
+.tbd .kicker{color:var(--amber)}
+.tbd ul{margin:0;padding-left:18px;font-size:12.5px;color:var(--ink-2)}
+.tbd li{margin-bottom:6px}
+
+@media (max-width:980px){
+  .page{padding:0 18px 70px}
+  .grid3,.grid2,.flow,.annots{grid-template-columns:1fr}
+  .app{grid-template-columns:160px minmax(0,1fr);height:auto}
+  .deck{grid-column:1/-1;border-left:none;border-top:1px solid var(--line)}
+  .step:not(:last-child):after{display:none}
+  .legend{display:none}
+}
+</style>
+</head>
+<body>
+<div class="page">
+
+<header class="masthead">
+  <div class="eyebrow">DESIGN DOC · v0.1 · 2026.11.15</div>
+  <h1>笔记 × Agent</h1>
+  <p class="lede">一个本地 Web 端：<b>在笔记的任务行上直接派活给 Agent，进度和结论回到这一行</b>。<br>
+  只接 <b>opencode</b> 和 <b>dsh</b> 两个 CLI，只服务一个人，一条命令启动，零数据库。</p>
+  <div class="metarow">
+    <span class="chip">借鉴 <b>obsidian-agent-deck</b> 的「任务行委派 + 写回」内核</span>
+    <span class="chip">形态 <b>本地 Web · 127.0.0.1</b></span>
+    <span class="chip">范围 <b>设计稿，不含实现</b></span>
+  </div>
+</header>
+
+<!-- 01 -->
+<section>
+  <div class="sec-head"><span class="num">01</span><h2>设计取舍</h2><p>个人工具，减法比加法重要</p></div>
+
+  <div class="grid3" style="margin-bottom:18px">
+    <div class="card pad"><div class="kicker">PRINCIPLE 01</div><h4>笔记是唯一的数据</h4><p>笔记就是本地 <code>.md</code> 文件。人写的和 Agent 写回的落在同一份文件里，关掉服务仍能用任何编辑器打开、能进 Git、能直接被 Obsidian 接管。</p></div>
+    <div class="card pad"><div class="kicker">PRINCIPLE 02</div><h4>不追踪，只发起</h4><p>状态来自自己启动的进程，而不是去解析各家的会话数据库。不扫描 <code>~/.dsh/sessions</code> 的 zstd 日志，也不读 opencode 的 SQLite。</p></div>
+    <div class="card pad"><div class="kicker">PRINCIPLE 03</div><h4>一屏完成一次委派</h4><p>写一行 → 选 Agent → 发送 → 看结果写回。没有确认弹窗、没有拖拽、没有设置向导；误发随时 <code>Stop</code>。</p></div>
+  </div>
+
+  <table>
+    <thead><tr><th style="width:26%">Agent Deck 的做法</th><th style="width:16%">本设计</th><th>理由</th></tr></thead>
+    <tbody>
+      <tr><td><b>任务行即委派入口</b>，行尾把手 / <code>@agent</code></td><td class="yes">保留 · 核心</td><td>把「记录」和「派活」合成一个动作，是整个项目值得借鉴的唯一内核。</td></tr>
+      <tr><td><b>状态 pill + 结论写回同一行</b></td><td class="yes">保留 · 简化</td><td>只留 5 个状态；结论 ≤ 240 字写进缩进子块，原文另存文件。</td></tr>
+      <tr><td><b>上下文：母项链 + 当前项子树</b></td><td class="yes">保留</td><td>派活时自动带上上级标题和子项，不带兄弟项；一行下拉可改范围。</td></tr>
+      <tr><td>扫描 7 类客户端本地会话日志 / SQLite / zstd</td><td class="no">砍掉</td><td>个人用只关心自己从笔记发起的 run；扫描是全部复杂度和脆弱性的来源。</td></tr>
+      <tr><td>拖拽绑定会话 ↔ 任务、deeplink 跳客户端</td><td class="no">砍掉</td><td>没有「外部会话」这个概念，自然不需要绑定。续聊走 CLI 的 <code>--continue</code> / <code>--resume</code>。</td></tr>
+      <tr><td>DOING / TOREVIEW / PAUSED / DONE 任务关键词体系</td><td class="no">砍掉</td><td>状态由编辑器装饰层渲染 + 隐藏锚点保存，不污染正文 Markdown。</td></tr>
+      <tr><td>菜单栏、Dreaming、长期记忆、整理模板、双语、统计面板</td><td class="no">砍掉</td><td>一个人的工具不需要回顾体系和可配置性，默认值定死就好。</td></tr>
+      <tr><td>模型 / 推理强度 / 权限模式分层设置</td><td class="no">收敛</td><td>放进一个配置文件，界面只留「谁执行、能不能改文件」两个开关。</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- 02 -->
+<section>
+  <div class="sec-head"><span class="num">02</span><h2>主界面</h2><p>三栏，一屏；右侧甲板可一键收起</p></div>
+
+  <div class="shot-wrap">
+    <div class="statebar">
+      <span class="lbl">演示状态</span>
+      <div class="seg" id="seg">
+        <button data-s="idle" class="on">○ 起草</button>
+        <button data-s="run">● 运行中</button>
+        <button data-s="done">✓ 已写回</button>
+      </div>
+      <div class="legend">
+        <span><i style="background:var(--blue)"></i>运行中</span>
+        <span><i style="background:var(--amber)"></i>待确认</span>
+        <span><i style="background:var(--green)"></i>完成</span>
+        <span><i style="background:var(--red)"></i>失败</span>
+      </div>
+    </div>
+
+    <div class="browser">
+      <div class="browser-bar">
+        <div class="dots"><i></i><i></i><i></i></div>
+        <span class="addr">127.0.0.1:7331</span>
+        <span class="bar-right">本地 · 未联网</span>
+      </div>
+      <div class="app">
+
+        <!-- rail -->
+        <aside class="rail">
+          <div class="rail-top">
+            <div class="brand"><span class="logo">N</span> Notes</div>
+            <div class="newbtn"><span>＋ 新建笔记</span><span>⌘N</span></div>
+            <div class="search">⌕ 搜索笔记</div>
+          </div>
+          <div class="rail-list">
+            <div class="group">最近</div>
+            <div class="note sel"><span class="dot"></span>PLP 测试异常排查<span class="badge" id="railBadge" style="display:none">1</span></div>
+            <div class="note"><span class="dot"></span>交接文档收窄</div>
+            <div class="note"><span class="dot"></span>Cola 交互规则</div>
+            <div class="group" style="margin-top:14px">更早</div>
+            <div class="note"><span class="dot"></span>TC-05.5 信号分组</div>
+            <div class="note"><span class="dot"></span>Quarch 夹具接线</div>
+            <div class="note"><span class="dot"></span>周记 11/09</div>
+          </div>
+          <div class="rail-foot"><span>~/notes/vault</span><span>⚙</span></div>
+        </aside>
+
+        <!-- editor -->
+        <main class="editor">
+          <div class="ed-head">
+            <div class="ed-title">PLP 测试异常排查</div>
+            <div class="ed-sub">2026-11-15.md · 自动保存于 15:47</div>
+            <div class="ed-tabs"><b>编辑</b><span>预览</span><span>历史</span></div>
+          </div>
+          <div class="cm">
+            <div class="cm-line"><span class="ln">1</span><span class="src"><span class="h"># PLP 测试异常排查</span></span></div>
+            <div class="cm-line"><span class="ln">2</span><span class="src"><span class="dim">盘：12.8TB UE53112T8V967E0022 · 192.168.107.10</span></span></div>
+            <div class="cm-line"><span class="ln">3</span><span class="src"></span></div>
+            <div class="cm-line"><span class="ln">4</span><span class="src"><span class="h">## 今日待办</span></span></div>
+            <div class="cm-line"><span class="ln">5</span><span class="src">- TODO 定位 TC-05.1 电源恢复异常 <span class="ag-oc">@opencode</span></span><span class="deco" id="deco5"></span></div>
+            <div class="cm-line active" id="line6"><span class="ln">6</span><span class="src">- TODO 整理 TC-05.5 信号分组与 timing <span class="ag-dsh">@dsh</span></span><span class="deco" id="deco6"></span></div>
+            <div class="cm-line"><span class="ln">7</span><span class="src">  - Lane / REFCLK / SMBus 三组，每组随机抽 1 个</span></div>
+            <div class="cm-line"><span class="ln">8</span><span class="src">  - 配合 power cycle + PRBS 注入</span></div>
+            <div class="cm-line"><span class="ln">9</span><span class="src"></span></div>
+            <div class="cm-line"><span class="ln">10</span><span class="src"><span class="h">## 备注</span></span></div>
+            <div class="cm-line"><span class="ln">11</span><span class="src">- 交接只留用例集 + 原始 power.py</span></div>
+          </div>
+          <div id="aiSlot"></div>
+          <div class="ed-foot"><span><kbd>⌘↵</kbd> 委派当前行</span><span><kbd>⌘K</kbd> 搜索</span><span style="margin-left:auto">Markdown · 纯文本落盘</span></div>
+        </main>
+
+        <!-- deck -->
+        <aside class="deck">
+          <div class="deck-head"><span class="kicker">AGENTS · 甲板</span><span class="online">2 个就绪</span></div>
+          <div class="deck-body" id="deckBody"></div>
+          <div class="deck-foot"><span>并发 1 / 2</span><span>收起 ⌘\</span></div>
+        </aside>
+
+      </div>
+    </div>
+
+    <div class="annots">
+      <div class="annot"><span class="n">1</span><span><b>任务行</b>就是委派单元。<code>@opencode</code> / <code>@dsh</code> 写在行里指定默认执行者，不写则用配置里的默认 Agent。</span></div>
+      <div class="annot"><span class="n">2</span><span><b>行尾装饰</b>由编辑器渲染，不写进正文：光标所在行浮出「委派」按钮，已派发的行显示状态 pill 与耗时。</span></div>
+      <div class="annot"><span class="n">3</span><span><b>写回块</b>是任务行下的缩进子块，只放 ≤ 240 字结论 + 原文链接；手写内容永不被覆盖。</span></div>
+      <div class="annot"><span class="n">4</span><span><b>Agent 甲板</b>固定两张卡，只显示本服务发起的运行；点卡片展开流式输出，可停止 / 重跑 / 续聊。</span></div>
+      <div class="annot"><span class="n">5</span><span><b>左栏</b>只有笔记列表和搜索，没有文件夹树、没有标签体系 —— 按日期倒序足够。</span></div>
+      <div class="annot"><span class="n">6</span><span><b>设置</b>不做独立页面，一个抽屉改 4 项：CLI 路径、默认 Agent、工作目录、是否允许写文件。</span></div>
+    </div>
+  </div>
+</section>
+
+<!-- 03 -->
+<section>
+  <div class="sec-head"><span class="num">03</span><h2>委派与回流</h2><p>从一行字到一段结论，四次状态变化</p></div>
+
+  <div class="flow">
+    <div class="step"><div class="n">01 / WRITE</div><h4>写一行</h4><p>在笔记里写 <code>- TODO …</code>，光标停在这一行。子项与上级标题自动成为上下文。</p></div>
+    <div class="step"><div class="n">02 / SEND</div><h4>⌘↵ 派活</h4><p>行尾浮层选 opencode / dsh，确认上下文范围，回车即发；不弹二次确认。</p></div>
+    <div class="step"><div class="n">03 / WATCH</div><h4>看进度</h4><p>行尾 pill 变蓝并计时，右侧卡片滚动流式输出；长任务可切到别的笔记继续写。</p></div>
+    <div class="step"><div class="n">04 / WRITE BACK</div><h4>结论回行</h4><p>完成后在任务行下插入子块：结论 / 改动 / 未完成；完整原文归档到 <code>.agent/runs/</code>。</p></div>
+  </div>
+
+  <div class="states">
+    <span class="pill queue"><span class="tick"></span>排队</span><span class="arr">→</span>
+    <span class="pill run"><span class="tick"></span>运行中</span><span class="arr">→</span>
+    <span class="pill wait"><span class="tick"></span>待确认</span><span class="arr">↘</span>
+    <span class="pill done"><span class="tick"></span>完成</span>
+    <span class="arr">/</span><span class="pill fail"><span class="tick"></span>失败</span>
+    <span class="arr">/</span><span class="pill queue"><span class="tick"></span>已停止</span>
+    <span style="margin-left:auto;color:var(--ink-3);font-size:11.5px">每个 Agent 同时 1 个任务，全局最多 2 个并行，超出排队</span>
+  </div>
+
+  <div class="grid2" style="margin-top:26px;align-items:start">
+    <div>
+      <h3>委派浮层 · 只有三个决策</h3>
+      <div class="pop">
+        <div class="pop-h">派给哪个 Agent<span class="esc">ESC 取消</span></div>
+        <div class="opt sel"><span class="rd"></span><span class="avatar oc">O</span><span>opencode</span><span class="sub">默认 · 代码 / 仓库分析</span></div>
+        <div class="opt"><span class="rd"></span><span class="avatar dsh">D</span><span>dsh</span><span class="sub">长任务 / 中文整理</span></div>
+        <div class="pop-ctx">上下文
+          <select><option>本行 + 上级 + 子项</option><option>仅本行</option><option>整篇笔记</option></select>
+        </div>
+        <div class="pop-ctx" style="border-top:1px solid var(--line-2)">权限
+          <select><option>只读分析（默认）</option><option>本次允许改文件</option></select>
+        </div>
+        <div class="pop-f"><span class="hint">3 行 · 约 180 字 · 可预览</span><span class="btn">取消</span><span class="btn pri">发送 ⌘↵</span></div>
+      </div>
+      <p class="small" style="margin-top:10px">上下文规则沿用借鉴项目：取母项链文本 + 当前项及其子树，<b>不带兄弟项</b>；已有写回块作为上一轮结论一并附上。</p>
+    </div>
+    <div>
+      <h3>写回 · 原文与正文分离</h3>
+      <pre><span class="c"># 用户正文（保持原样）</span>
+- TODO 整理 TC-05.5 信号分组 @dsh
+  <span class="c">&lt;!-- run: 20261115-1552-dsh-a1b2 --&gt;</span>
+  - 🤖 15:52–15:54 · dsh
+    <span class="p">结论：</span>三组信号可按「组→信号→timing」
+    两级随机抽取，每轮 1–2 组，与 power cycle
+    对齐后注入 PRBS，覆盖 27 个用例无重复。
+    <span class="p">改动：</span>无（只读分析）
+    <span class="p">未完成：</span>timing 取值范围需人工确认
+    ↳ 原文 .agent/runs/20261115-1552-dsh-a1b2.md
+
+<span class="c"># 隐藏锚点只存元数据；pill / 按钮由编辑器渲染</span>
+<span class="c"># 文件级串行写入队列，写前重读磁盘合并手写改动</span></pre>
+      <ul class="clean" style="margin-top:12px">
+        <li><b>幂等</b>：同一 <code>runId</code> 只更新自己的子块，重跑生成新块，不覆盖上一轮。</li>
+        <li><b>不覆盖</b>：写回前重读文件，按锚点定位插入；用户在 Agent 跑动期间手写的任何内容都保留。</li>
+        <li><b>不截断</b>：≤ 240 字是结论长度，完整 stdout / 事件流另存 <code>.md</code>，链接可点开。</li>
+        <li><b>不额外调模型</b>：结论由委派提示词末尾固定的一句格式要求产出（「最后用 3 行写：结论 / 改动 / 未完成」），直接截取该段写回；超长或缺失时退化为「查看原文」链接，不引入第二个 LLM 调用。</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- 04 -->
+<section>
+  <div class="sec-head"><span class="num">04</span><h2>数据与存储</h2><p>一个目录，一种格式，零数据库</p></div>
+  <div class="grid2" style="align-items:start">
+    <div>
+      <pre>vault/                     <span class="c">← 笔记库（可配置，纯 md）</span>
+  2026-11-15.md
+  2026-11-14.md
+  ...
+<span class="k">.agent/</span>                    <span class="c">← 与笔记同级，可整个删掉重建</span>
+  config.json               <span class="c">CLI 路径 / 默认 Agent / cwd</span>
+  state.json                <span class="c">runId ↔ 文件+行锚点+状态</span>
+  runs/
+    20261115-1552-dsh-a1b2.md  <span class="c">完整原文</span>
+    20261115-1549-oc-c3d4.md</pre>
+    </div>
+    <div>
+      <pre><span class="c">// config.json · 只有这些</span>
+{
+  <span class="s">"vault"</span>: <span class="s">"~/notes/vault"</span>,
+  <span class="s">"defaultAgent"</span>: <span class="s">"opencode"</span>,
+  <span class="s">"agents"</span>: {
+    <span class="s">"opencode"</span>: { <span class="s">"bin"</span>: <span class="s">"opencode"</span>, <span class="s">"model"</span>: <span class="s">""</span> },
+    <span class="s">"dsh"</span>:      { <span class="s">"bin"</span>: <span class="s">"dsh"</span>, <span class="s">"profile"</span>: <span class="s">"headless"</span> }
+  },
+  <span class="s">"allowWrite"</span>: <span class="k">false</span>,   <span class="c">// 默认只读分析</span>
+  <span class="s">"timeoutMin"</span>: 10
+}</pre>
+      <p class="small" style="margin-top:10px">没有账号、没有云、没有索引库。<code>state.json</code> 丢了最多是丢失运行记录，笔记本身不受影响；笔记可直接被 Obsidian / Git / 任意编辑器打开。</p>
+    </div>
+  </div>
+  <h3>运行记录 · state.json 单条结构</h3>
+  <pre>{ <span class="s">"runId"</span>: <span class="s">"20261115-1552-dsh-a1b2"</span>, <span class="s">"agent"</span>: <span class="s">"dsh"</span>, <span class="s">"file"</span>: <span class="s">"2026-11-15.md"</span>, <span class="s">"anchor"</span>: 6,
+  <span class="s">"status"</span>: <span class="s">"done"</span>, <span class="s">"startedAt"</span>: <span class="s">"15:52:04"</span>, <span class="s">"durationSec"</span>: 118,
+  <span class="s">"sessionRef"</span>: <span class="s">"&lt;CLI 续聊标识&gt;"</span>, <span class="s">"rawFile"</span>: <span class="s">".agent/runs/....md"</span> }</pre>
+</section>
+
+<!-- 05 -->
+<section>
+  <div class="sec-head"><span class="num">05</span><h2>技术架构</h2><p>单进程 + 静态前端，一条命令启动</p></div>
+
+  <div class="arch">
+    <div class="layer"><div class="lbl">BROWSER</div><div class="boxes">
+      <div class="box"><b>笔记列表</b><div class="sm">搜索 / 新建 / 打开</div></div>
+      <div class="box hl"><b>CodeMirror 6 编辑器</b><div class="sm">行装饰：pill、按钮、写回块</div></div>
+      <div class="box hl"><b>Agent 甲板</b><div class="sm">2 张卡 + 流式输出</div></div>
+      <div class="box"><b>设置抽屉</b><div class="sm">4 项配置</div></div>
+    </div></div>
+    <div class="arrowdown">↓ REST（笔记 CRUD / 委派 / 停止 / 配置）　↑ SSE（流式事件）</div>
+    <div class="layer"><div class="lbl">LOCAL SERVER</div><div class="boxes">
+      <div class="box"><b>Node 单进程</b><div class="sm">仅监听 127.0.0.1:7331</div></div>
+      <div class="box"><b>Vault 读写</b><div class="sm">文件级串行队列 + 写前重读合并</div></div>
+      <div class="box hl"><b>Run Manager</b><div class="sm">状态机 / 并发 2 / 超时 / stop</div></div>
+      <div class="box"><b>写回器</b><div class="sm">锚点定位 · 幂等插入 · 结论生成</div></div>
+    </div></div>
+    <div class="arrowdown">↓ child_process.spawn（cwd 锁定 vault）　↑ stdout / NDJSON</div>
+    <div class="layer"><div class="lbl">ADAPTERS</div><div class="boxes">
+      <div class="box hl"><b>opencode</b><div class="sm">opencode run --format json</div></div>
+      <div class="box hl"><b>dsh</b><div class="sm">dsh --profile headless</div></div>
+      <div class="box"><b>AgentAdapter 接口</b><div class="sm">spawn / parse / stop / resume</div></div>
+    </div></div>
+  </div>
+
+  <div class="grid2" style="margin-top:22px;align-items:start">
+    <div>
+      <h3>适配层契约 · 加第三个 Agent 只改这里</h3>
+      <pre><span class="k">interface</span> AgentAdapter {
+  id: <span class="s">'opencode'</span> | <span class="s">'dsh'</span>
+  spawn(req: RunRequest): ChildProcess
+  parse(line: string): AgentEvent | null
+  stop(proc: ChildProcess): void
+  resumeRef(proc): string        <span class="c">// 续聊用</span>
+}
+
+<span class="k">type</span> AgentEvent =
+  | { t:<span class="s">'delta'</span>,  text: string }
+  | { t:<span class="s">'tool'</span>,   name: string, detail: string }
+  | { t:<span class="s">'need_ok'</span>, prompt: string }
+  | { t:<span class="s">'done'</span>,   text: string }
+  | { t:<span class="s">'error'</span>,  message: string }</pre>
+      <p class="small" style="margin-top:10px">两个 CLI 的输出差异全部消化在 <code>parse()</code> 里，UI 与写回器只认统一事件。借鉴项目的接入原则同样适用：<b>必须有能非交互跑完的 CLI</b>，否则不接。</p>
+    </div>
+    <div>
+      <h3>实际命令</h3>
+      <pre><span class="c"># opencode：NDJSON 事件流，逐行解析</span>
+opencode run --format json \
+  --dir &lt;vault&gt; --model &lt;provider/model&gt; \
+  "&lt;prompt&gt;"
+<span class="c"># 续聊：--continue / --session &lt;id&gt;</span>
+<span class="c"># 不传 --auto：默认拒绝权限请求</span>
+
+<span class="c"># dsh：headless 一次性任务</span>
+dsh --profile headless "&lt;prompt&gt;"
+<span class="c"># 或 dsh run --task-file / --profile</span>
+<span class="c"># status / log / stop 作为兜底探测</span></pre>
+      <table style="margin-top:14px">
+        <thead><tr><th>差异点</th><th>处理方式</th></tr></thead>
+        <tbody>
+          <tr><td>opencode 结构化事件</td><td>逐行 NDJSON → <code>delta / tool / done</code></td></tr>
+          <tr><td>dsh 输出格式不稳定</td><td>默认按文本流 + 退出码；支持 JSON 时只改 adapter</td></tr>
+          <tr><td>权限 / yolo</td><td>默认<b>只读</b>；写文件需单次显式勾选，绝不默认全自动</td></tr>
+          <tr><td>取消</td><td>SIGTERM → 状态置 <code>stopped</code>，保留已收到的输出</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<!-- 06 -->
+<section>
+  <div class="sec-head"><span class="num">06</span><h2>范围边界</h2><p>写清楚不做什么，比写清楚做什么更重要</p></div>
+  <div class="grid2" style="align-items:start">
+    <div class="card pad">
+      <div class="kicker" style="color:var(--green)">MVP · 只做这些</div>
+      <ul class="clean" style="margin-top:10px">
+        <li>笔记的新建 / 打开 / 搜索 / 编辑 / 自动保存（纯 <code>.md</code>）</li>
+        <li>Markdown 编辑器 + 任务行装饰（状态 pill、委派按钮、写回块）</li>
+        <li>从任务行委派，上下文三档范围可选</li>
+        <li>opencode / dsh 两个 adapter，流式输出、停止、重跑、续聊</li>
+        <li>结论写回 + 原文归档，手写内容零覆盖</li>
+        <li>甲板 2 张卡 + 最近运行列表</li>
+        <li>设置抽屉 4 项（CLI 路径 / 默认 Agent / 工作目录 / 写权限），超时等冷参数只放 <code>config.json</code>；快捷键 3 个：<code>⌘↵</code> 委派 / <code>⌘K</code> 搜索 / <code>⌘\</code> 收起甲板</li>
+      </ul>
+    </div>
+    <div class="card pad">
+      <div class="kicker" style="color:var(--red)">明确不做</div>
+      <ul class="clean" style="margin-top:10px">
+        <li>账号 / 登录 / 云同步 / 多用户 / 权限体系</li>
+        <li>数据库、全文索引、向量检索、RAG</li>
+        <li>扫描外部客户端会话、deeplink、桌面端跳转</li>
+        <li>富文本块编辑器、双向链接、图谱、插件市场</li>
+        <li>菜单栏常驻、统计看板、长期记忆 / Dreaming、整理模板</li>
+        <li>多语言、主题切换、协作、移动端适配</li>
+        <li>第三个 Agent —— 接口留好，但当前不接</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="tbd">
+    <div class="kicker">两个默认假设（已按此设计，实现前验证即可，不阻塞）</div>
+    <ul>
+      <li><b>dsh 输出</b>：假设 headless 模式的 stdout 是文本流 + 退出码；若它提供结构化事件，只在 <code>dsh.parse()</code> 内部替换，UI 不变。</li>
+      <li><b>写权限</b>：假设默认让 Agent 只读分析笔记库，需要它改文件时在浮层单次授权；工作目录始终锁定 vault，不开放任意路径。</li>
+    </ul>
+  </div>
+</section>
+
+<div class="foot">
+  <span>笔记 × Agent · Design v0.1 · 仅设计稿</span>
+  <span>借鉴 obsidian-agent-deck — 保留「任务行委派 + 结论回流」，其余全部精简</span>
+</div>
+
+</div>
+
+<script>
+(function(){
+  var S = 'idle';
+  var $ = function(id){ return document.getElementById(id); };
+
+  var decks = {
+    idle:
+      '<div class="acard"><div class="acard-h"><span class="avatar oc">O</span><span class="nm">opencode</span><span class="st idle">○ 空闲</span></div>'+
+      '<div class="taskline">最近：分析 power.py 恢复链路 · 14:20 完成</div><div class="acts"><span>新任务</span><span>查看原文</span></div></div>'+
+      '<div class="acard"><div class="acard-h"><span class="avatar dsh">D</span><span class="nm">dsh</span><span class="st idle">○ 空闲</span></div>'+
+      '<div class="taskline">最近：交接文档收窄 · 11:08 完成</div><div class="acts"><span>新任务</span><span>查看原文</span></div></div>'+
+      '<div class="deck-sub">最近运行</div>'+
+      '<div class="runrow"><span class="who oc">oc</span><span>分析 power.py 恢复链路</span><span class="t">14:20 ✓</span></div>'+
+      '<div class="runrow"><span class="who dsh">dsh</span><span>交接文档收窄</span><span class="t">11:08 ✓</span></div>'+
+      '<div class="runrow"><span class="who oc">oc</span><span>TC-05.2 参数复核</span><span class="t">昨 ✕</span></div>',
+    run:
+      '<div class="acard busy"><div class="acard-h"><span class="avatar oc">O</span><span class="nm">opencode</span><span class="st run">● 运行中</span></div>'+
+      '<div class="taskline">定位 TC-05.1 电源恢复异常</div>'+
+      '<div class="prog"><i></i></div>'+
+      '<div class="stream">› read power.py · grep power_cycle · 02:14</div>'+
+      '<div class="acts"><span class="red">停止</span><span>看输出</span></div></div>'+
+      '<div class="acard"><div class="acard-h"><span class="avatar dsh">D</span><span class="nm">dsh</span><span class="st idle">○ 空闲</span></div>'+
+      '<div class="taskline">最近：交接文档收窄 · 11:08 完成</div><div class="acts"><span>新任务</span><span>查看原文</span></div></div>'+
+      '<div class="deck-sub">最近运行</div>'+
+      '<div class="runrow"><span class="who oc">oc</span><span>定位 TC-05.1 电源恢复异常</span><span class="t">● 02:14</span></div>'+
+      '<div class="runrow"><span class="who dsh">dsh</span><span>交接文档收窄</span><span class="t">11:08 ✓</span></div>',
+    done:
+      '<div class="acard"><div class="acard-h"><span class="avatar oc">O</span><span class="nm">opencode</span><span class="st done">✓ 已完成</span></div>'+
+      '<div class="taskline">定位 TC-05.1 电源恢复异常 · 3m 06s</div>'+
+      '<div class="acts"><span>看原文</span><span>续聊</span><span>重跑</span></div></div>'+
+      '<div class="acard"><div class="acard-h"><span class="avatar dsh">D</span><span class="nm">dsh</span><span class="st idle">○ 空闲</span></div>'+
+      '<div class="taskline">最近：交接文档收窄 · 11:08 完成</div><div class="acts"><span>新任务</span><span>查看原文</span></div></div>'+
+      '<div class="deck-sub">最近运行</div>'+
+      '<div class="runrow"><span class="who oc">oc</span><span>定位 TC-05.1 电源恢复异常</span><span class="t">15:55 ✓</span></div>'+
+      '<div class="runrow"><span class="who dsh">dsh</span><span>交接文档收窄</span><span class="t">11:08 ✓</span></div>'
+  };
+
+  var ai = {
+    idle:'',
+    run:'',
+    done:'<div class="ai-block"><div class="ai-h">🤖 opencode · 15:52–15:55 · 结论已写回<span class="lock">只读展示</span></div>'+
+         '结论：power_cycle 后未等待 PLP 电容放电完成即下发 reset，恢复窗口偏短约 40ms；改动：无；未完成：需真机复测 100 轮确认。'+
+         ' <span style="color:#4f46e5">↳ 查看原文</span></div>'
+  };
+
+  function render(){
+    // line 5 (opencode) decorations
+    $('deco5').innerHTML =
+      S==='idle' ? '' :
+      S==='run'  ? '<span class="pill run"><span class="tick"></span>运行中 02:14</span>' :
+                   '<span class="pill done"><span class="tick"></span>完成 3m06s</span>';
+    // line 6 (cursor / dsh) decorations
+    $('deco6').innerHTML =
+      S==='idle' ? '<span class="ghost primary">↗ 委派 ⌘↵</span>' :
+      S==='run'  ? '<span class="ghost">↗ 委派</span>' :
+                   '<span class="ghost primary">↗ 委派 ⌘↵</span>';
+    $('line6').className = 'cm-line' + (S==='idle'||S==='done' ? ' active' : '');
+    $('aiSlot').innerHTML = ai[S];
+    $('railBadge').style.display = S==='run' ? '' : 'none';
+    $('deckBody').innerHTML = decks[S];
+    var btns = document.querySelectorAll('#seg button');
+    for(var i=0;i<btns.length;i++){ btns[i].className = btns[i].dataset.s===S ? 'on' : ''; }
+  }
+
+  document.getElementById('seg').addEventListener('click', function(e){
+    var b = e.target.closest('button');
+    if(!b) return;
+    S = b.dataset.s;
+    render();
+  });
+  render();
+})();
+</script>
+</body>
+</html>
